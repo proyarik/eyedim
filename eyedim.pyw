@@ -19,8 +19,19 @@ import time
 
 # --- SYSTEM CONSTANTS ---
 DWMWA_WINDOW_CORNER_PREFERENCE = 33  # Window corner rounding preference for Win11
-APP_VERSION = "v2.0.1"
+APP_VERSION = "v2.0.4"
 DONATE_URL = "https://your-donation-link.com"  # Insert your payment link here
+
+# --- GAMMA SAFETY LIMITS ---
+# Many drivers (especially Intel integrated / laptop panels) silently
+# reject SetDeviceGammaRamp when the blue channel drops below ~0.5 or
+# the green channel below ~0.7 — the ramp must stay monotonic and
+# within a range the driver considers valid. Capping the factors here
+# guarantees the ramp is always accepted, at the cost of a slightly
+# weaker maximum night-light effect. This is what fixed the
+# "night light stops working above ~65%" bug.
+GAMMA_GREEN_MIN = 0.70
+GAMMA_BLUE_MIN = 0.55
 
 # --- LOCALIZATION DICTIONARIES ---
 LANG = "en"
@@ -148,26 +159,110 @@ def update_popup_labels_and_sliders():
         contrast_label_ref.config(text=f"{current_contrast}")
 
 # ============================================================
+# GAMMA RAMP BUILD / APPLY (module level)
+# ============================================================
+def build_gamma_ramp(nl, c):
+    nl_factor = nl / 100.0
+    c_factor = (c - 50) / 50.0
+
+    gf = max(GAMMA_GREEN_MIN, 1.0 - 0.40 * nl_factor)
+    bf = max(GAMMA_BLUE_MIN, 1.0 - 0.75 * nl_factor)
+
+    ramp = bytearray(1536)
+    for i in range(256):
+        val_base = i * 257
+
+        if c_factor != 0:
+            normalized = (val_base - 32768) / 32768.0
+            if c_factor > 0:
+                adjusted = normalized * (1.0 + c_factor * 0.5)
+            else:
+                adjusted = normalized * (1.0 + c_factor * 0.4)
+            val_base = max(0, min(65535, int(32768 + adjusted * 32768)))
+
+        r = min(65535, int(val_base * 1.0))
+        g = min(65535, int(val_base * gf))
+        b = min(65535, int(val_base * bf))
+
+        ramp[i * 2: i * 2 + 2] = r.to_bytes(2, 'little')
+        ramp[512 + i * 2: 512 + i * 2 + 2] = g.to_bytes(2, 'little')
+        ramp[1024 + i * 2: 1024 + i * 2 + 2] = b.to_bytes(2, 'little')
+    return bytes(ramp)
+
+def apply_gamma_direct(nl, c):
+    try:
+        ramp = build_gamma_ramp(nl, c)
+
+        def monitor_enum_proc(hMonitor, hdcMonitor, lprcMonitor, dwData):
+            try:
+                info = win32api.GetMonitorInfo(hMonitor)
+                device_name = info['Device']
+                hdc = win32gui.CreateDC(device_name, device_name, None)
+                if hdc:
+                    try:
+                        ctypes.windll.gdi32.SetDeviceGammaRamp(hdc, ramp)
+                    finally:
+                        win32gui.DeleteDC(hdc)
+            except Exception:
+                pass
+            return True
+
+        MONITORENUMPROC = ctypes.WINFUNCTYPE(
+            wintypes.BOOL, wintypes.HMONITOR, wintypes.HDC,
+            ctypes.POINTER(wintypes.RECT), wintypes.LPARAM
+        )
+        ctypes.windll.user32.EnumDisplayMonitors(None, None, MONITORENUMPROC(monitor_enum_proc), 0)
+    except Exception:
+        pass
+
+# ============================================================
+# GAMMA STATE — lock + dirty flag, no queue races
+# ============================================================
+gamma_lock = threading.Lock()
+gamma_dirty = threading.Event()
+gamma_pending = {"nl": current_night_light, "c": current_contrast}
+
+def request_gamma_update(nl=None, c=None):
+    with gamma_lock:
+        if nl is not None:
+            gamma_pending["nl"] = nl
+        if c is not None:
+            gamma_pending["c"] = c
+    gamma_dirty.set()
+
+def read_pending_gamma():
+    with gamma_lock:
+        return gamma_pending["nl"], gamma_pending["c"]
+
+def gamma_worker():
+    while True:
+        gamma_dirty.wait()
+        gamma_dirty.clear()
+        nl, c = read_pending_gamma()
+        apply_gamma_direct(nl, c)
+
+threading.Thread(target=gamma_worker, daemon=True).start()
+
+# ============================================================
 # BRIGHTNESS WORKER — single thread, "last value wins", step 5
 # ============================================================
-# Единственный поток, который общается с DDC/CI. Параллельных вызовов
-# sbc.set_brightness больше нет — именно они вызывали мерцание.
 brightness_queue = queue.Queue()
-
-# Шаг округления при ОТПРАВКЕ значения в систему.
-# Сам ползунок и подписи остаются плавными (1:1 с мышью),
-# а в DDC/CI уходит округлённое значение — это снижает нагрузку
-# на шину и убирает «дрожание» между соседними уровнями.
 BRIGHTNESS_STEP = 5
+GAMMA_RESTORE_DELAY = 0.12
 
 def brightness_worker():
     last_applied = -1
+    restore_timer = None
+
+    def restore_gamma_later():
+        time.sleep(GAMMA_RESTORE_DELAY)
+        nl, c = read_pending_gamma()
+        apply_gamma_direct(nl, c)
+
     while True:
         val = brightness_queue.get()
         if val is None:
             break
-        # Вытесняем все накопившиеся промежуточные значения —
-        # применяем только самое свежее.
         while not brightness_queue.empty():
             try:
                 val = brightness_queue.get_nowait()
@@ -178,14 +273,17 @@ def brightness_worker():
         try:
             sbc.set_brightness(val)
             last_applied = val
+            if restore_timer is not None:
+                restore_timer.cancel()
+            restore_timer = threading.Timer(GAMMA_RESTORE_DELAY, restore_gamma_later)
+            restore_timer.daemon = True
+            restore_timer.start()
         except Exception:
             pass
 
 threading.Thread(target=brightness_worker, daemon=True).start()
 
 def enqueue_brightness(value):
-    """Кладёт значение в очередь, предварительно вытеснив старое,
-    и округляет до BRIGHTNESS_STEP."""
     snapped = max(0, min(100, int(round(value / BRIGHTNESS_STEP)) * BRIGHTNESS_STEP))
     if brightness_queue.full():
         try:
@@ -195,85 +293,12 @@ def enqueue_brightness(value):
     brightness_queue.put(snapped)
 
 # ============================================================
-# GAMMA WORKER — night light + contrast
-# ============================================================
-# Оптимизированный воркер с антимерцающим троттлингом
-gamma_queue = queue.Queue(maxsize=1)
-
-def gamma_worker():
-    while True:
-        nl, c = gamma_queue.get()
-        try:
-            time.sleep(0.03)  # Throttle: даём драйверу «успокоиться» между кадрами
-            nl_factor = nl / 100.0
-            c_factor = (c - 50) / 50.0
-
-            ramp = bytearray(1536)
-            for i in range(256):
-                val_base = i * 257
-
-                rf = 1.0
-                gf = 1.0 - (0.40 * nl_factor)
-                bf = 1.0 - (0.75 * nl_factor)
-
-                if c_factor != 0:
-                    normalized = (val_base - 32768) / 32768.0
-                    if c_factor > 0:
-                        adjusted = normalized * (1.0 + c_factor * 0.5)
-                    else:
-                        adjusted = normalized * (1.0 + c_factor * 0.4)
-                    val_base = max(0, min(65535, int(32768 + adjusted * 32768)))
-
-                r = min(65535, int(val_base * rf))
-                g = min(65535, int(val_base * gf))
-                b = min(65535, int(val_base * bf))
-
-                ramp[i * 2: i * 2 + 2] = r.to_bytes(2, 'little')
-                ramp[512 + i * 2: 512 + i * 2 + 2] = g.to_bytes(2, 'little')
-                ramp[1024 + i * 2: 1024 + i * 2 + 2] = b.to_bytes(2, 'little')
-
-            def monitor_enum_proc(hMonitor, hdcMonitor, lprcMonitor, dwData):
-                try:
-                    info = win32api.GetMonitorInfo(hMonitor)
-                    device_name = info['Device']
-                    hdc = win32gui.CreateDC(device_name, device_name, None)
-                    if hdc:
-                        try:
-                            ctypes.windll.gdi32.SetDeviceGammaRamp(hdc, bytes(ramp))
-                        finally:
-                            win32gui.DeleteDC(hdc)
-                except Exception:
-                    pass
-                return True
-
-            MONITORENUMPROC = ctypes.WINFUNCTYPE(
-                wintypes.BOOL, wintypes.HMONITOR, wintypes.HDC,
-                ctypes.POINTER(wintypes.RECT), wintypes.LPARAM
-            )
-            ctypes.windll.user32.EnumDisplayMonitors(None, None, MONITORENUMPROC(monitor_enum_proc), 0)
-        except Exception:
-            pass
-        gamma_queue.task_done()
-
-threading.Thread(target=gamma_worker, daemon=True).start()
-
-def apply_display_settings():
-    if gamma_queue.full():
-        try:
-            gamma_queue.get_nowait()
-        except queue.Empty:
-            pass
-    gamma_queue.put((current_night_light, current_contrast))
-
-# ============================================================
 # SETTERS
 # ============================================================
 def set_brightness(val, send_system=True):
     global current_brightness
     current_brightness = max(0, min(100, int(val)))
     if send_system:
-        # Плавно обновляем UI, а в систему уходит округлённое значение
-        # через единственный воркер — никаких параллельных потоков.
         enqueue_brightness(current_brightness)
     update_tray_icon()
     update_popup_labels_and_sliders()
@@ -281,40 +306,64 @@ def set_brightness(val, send_system=True):
 def set_night_light(val):
     global current_night_light
     current_night_light = max(0, min(100, int(val)))
-    apply_display_settings()
+    request_gamma_update(nl=current_night_light)
     update_popup_labels_and_sliders()
 
 def set_contrast(val):
     global current_contrast
     current_contrast = max(0, min(100, int(val)))
-    apply_display_settings()
+    request_gamma_update(c=current_contrast)
     update_popup_labels_and_sliders()
 
 def toggle_preset():
-    global preset_active, saved_brightness, saved_night_light, saved_contrast, current_brightness, current_night_light, current_contrast, preset_btn_ref
+    global preset_active, saved_brightness, saved_night_light, saved_contrast, \
+           current_brightness, current_night_light, current_contrast, preset_btn_ref
+
+    old_brightness = current_brightness
+
     if not preset_active:
-        # Switching from User to Default mode
         saved_brightness = current_brightness
         saved_night_light = current_night_light
         saved_contrast = current_contrast
 
-        set_brightness(80)
-        set_night_light(10)
-        set_contrast(50)
+        current_brightness = 80
+        current_night_light = 10
+        current_contrast = 50
         preset_active = True
     else:
-        # Switching from Default back to User mode
-        set_brightness(saved_brightness)
-        set_night_light(saved_night_light)
-        set_contrast(saved_contrast)
+        current_brightness = saved_brightness
+        current_night_light = saved_night_light
+        current_contrast = saved_contrast
         preset_active = False
 
     update_popup_labels_and_sliders()
+    update_tray_icon()
+
+    if current_brightness != old_brightness:
+        enqueue_brightness(current_brightness)
+
+    request_gamma_update(current_night_light, current_contrast)
+
     if preset_btn_ref:
         if preset_active:
             preset_btn_ref.config(text=t("mode_default"), bg="#ffe0b2")
         else:
             preset_btn_ref.config(text=t("mode_user"), bg="#e0e0e0")
+
+# Cached font loader to avoid disk overhead
+_cached_font = None
+def get_cached_font():
+    global _cached_font
+    if _cached_font is not None:
+        return _cached_font
+    for font_name in ["arialbd.ttf", "segoeuib.ttf", "arial.ttf"]:
+        try:
+            _cached_font = ImageFont.truetype(font_name, 36)
+            return _cached_font
+        except Exception:
+            continue
+    _cached_font = ImageFont.load_default()
+    return _cached_font
 
 def create_text_icon(brightness_val):
     image = Image.new('RGBA', (64, 64), (0, 0, 0, 0))
@@ -330,16 +379,7 @@ def create_text_icon(brightness_val):
     else:
         xy = (-1, 10)
 
-    font = None
-    for font_name in ["arialbd.ttf", "segoeuib.ttf", "arial.ttf"]:
-        try:
-            font = ImageFont.truetype(font_name, 36)
-            break
-        except Exception:
-            continue
-    if not font:
-        font = ImageFont.load_default()
-
+    font = get_cached_font()
     dc.text(xy, text, fill=(255, 200, 50), font=font)
     return image
 
@@ -488,8 +528,6 @@ class ThinSlider(tk.Canvas):
 
         thumb_w = 16
         thumb_h = 8
-        # margin = половина ширины ползунка + 1px запас,
-        # чтобы ползунок в крайних положениях не выходил за границу canvas.
         margin = thumb_w // 2 + 1
 
         line_y = h // 2
@@ -614,7 +652,7 @@ def quit_app(icon, item):
     global current_night_light, current_contrast
     current_night_light = 0
     current_contrast = 50
-    apply_display_settings()
+    request_gamma_update(current_night_light, current_contrast)
     close_popup()
     close_about()
     icon.stop()
