@@ -18,18 +18,11 @@ import io
 import time
 
 # --- SYSTEM CONSTANTS ---
-DWMWA_WINDOW_CORNER_PREFERENCE = 33  # Window corner rounding preference for Win11
-APP_VERSION = "v2.0.6"
-DONATE_URL = "https://your-donation-link.com"  # Insert your payment link here
+DWMWA_WINDOW_CORNER_PREFERENCE = 33
+APP_VERSION = "v2.0.7"
+DONATE_URL = "https://your-donation-link.com"
 
 # --- GAMMA SAFETY LIMITS ---
-# Many drivers (especially Intel integrated / laptop panels) silently
-# reject SetDeviceGammaRamp when the blue channel drops below ~0.5 or
-# the green channel below ~0.7 — the ramp must stay monotonic and
-# within a range the driver considers valid. Capping the factors here
-# guarantees the ramp is always accepted, at the cost of a slightly
-# weaker maximum night-light effect. This is what fixed the
-# "night light stops working above ~65%" bug.
 GAMMA_GREEN_MIN = 0.70
 GAMMA_BLUE_MIN = 0.55
 
@@ -83,7 +76,7 @@ except Exception:
 current_night_light = 0
 current_contrast = 50
 
-preset_active = False  # False = User mode, True = Default mode
+preset_active = False
 saved_brightness = current_brightness
 saved_night_light = current_night_light
 saved_contrast = current_contrast
@@ -97,10 +90,36 @@ contrast_slider_ref = None
 brightness_label_ref = None
 night_label_ref = None
 contrast_label_ref = None
-preset_btn_ref = None
 
 startup_registry_key = r"Software\Microsoft\Windows\CurrentVersion\Run"
 app_name = "Eyedim"
+
+# ============================================================
+# SINGLE ROOT TK — created inside its own thread and kept hidden.
+# ============================================================
+# Tkinter must own the thread that runs its mainloop(), and it cannot
+# share an interpreter across threads. So:
+#   * main thread  -> pystray.Icon.run() (tray message loop)
+#   * tk thread    -> Tk() + mainloop()
+# All UI work is marshalled onto the Tk thread via root_window.after().
+root_window = None
+_root_ready = threading.Event()
+
+def tk_thread_main():
+    global root_window
+    root_window = tk.Tk()
+    root_window.withdraw()
+    _root_ready.set()
+    root_window.mainloop()
+
+threading.Thread(target=tk_thread_main, daemon=True).start()
+_root_ready.wait()
+
+def ui_call(fn, *args, **kwargs):
+    """Schedule fn to run on the Tk main thread."""
+    if root_window is None:
+        return
+    root_window.after(0, lambda: fn(*args, **kwargs))
 
 def is_autostart_enabled():
     try:
@@ -132,9 +151,19 @@ def toggle_language(icon, item):
     LANG = "ru" if LANG == "en" else "en"
     update_tray_icon()
     icon.update_menu()
-    if popup_window:
-        close_popup()
-        show_popup()
+    ui_call(rebuild_open_windows)
+
+def rebuild_open_windows():
+    popup_was_open = popup_window is not None
+    about_was_open = about_window is not None
+
+    close_popup()
+    close_about()
+
+    if popup_was_open:
+        _show_popup_ui()
+    if about_was_open:
+        _show_about_ui()
 
 def update_tray_icon():
     global tray_icon_ref
@@ -159,7 +188,7 @@ def update_popup_labels_and_sliders():
         contrast_label_ref.config(text=f"{current_contrast}")
 
 # ============================================================
-# GAMMA RAMP BUILD / APPLY (module level)
+# GAMMA RAMP BUILD / APPLY
 # ============================================================
 def build_gamma_ramp(nl, c):
     nl_factor = nl / 100.0
@@ -216,7 +245,7 @@ def apply_gamma_direct(nl, c):
         pass
 
 # ============================================================
-# GAMMA STATE — lock + dirty flag, no queue races
+# GAMMA STATE
 # ============================================================
 gamma_lock = threading.Lock()
 gamma_dirty = threading.Event()
@@ -244,7 +273,7 @@ def gamma_worker():
 threading.Thread(target=gamma_worker, daemon=True).start()
 
 # ============================================================
-# BRIGHTNESS WORKER — single thread, "last value wins", step 5
+# BRIGHTNESS WORKER
 # ============================================================
 brightness_queue = queue.Queue()
 BRIGHTNESS_STEP = 5
@@ -344,7 +373,7 @@ def toggle_preset():
 
     request_gamma_update(current_night_light, current_contrast)
 
-# Cached font loader to avoid disk overhead
+# Cached font loader
 _cached_font = None
 def get_cached_font():
     global _cached_font
@@ -363,7 +392,6 @@ def create_text_icon(brightness_val):
     image = Image.new('RGBA', (64, 64), (0, 0, 0, 0))
     dc = ImageDraw.Draw(image)
 
-    # Draw only the top and bottom horizontal lines
     line_color = (255, 200, 50, 255)
     line_width = 3
     dc.line([(2, 4), (62, 4)], fill=line_color, width=line_width)
@@ -401,14 +429,13 @@ def draw_vector_contrast(canvas, x, y):
     canvas.create_arc(x - 8, y - 8, x + 8, y + 8, start=90, extent=180, fill="#dddddd", outline="")
 
 def close_popup():
-    global popup_window, brightness_slider_ref, night_slider_ref, contrast_slider_ref, brightness_label_ref, night_label_ref, contrast_label_ref, preset_btn_ref
+    global popup_window, brightness_slider_ref, night_slider_ref, contrast_slider_ref, brightness_label_ref, night_label_ref, contrast_label_ref
     brightness_slider_ref = None
     night_slider_ref = None
     contrast_slider_ref = None
     brightness_label_ref = None
     night_label_ref = None
     contrast_label_ref = None
-    preset_btn_ref = None
     if popup_window:
         try:
             popup_window.destroy()
@@ -426,6 +453,9 @@ def close_about():
         about_window = None
 
 def show_about(icon=None, item=None):
+    ui_call(_show_about_ui)
+
+def _show_about_ui():
     global about_window
     if about_window is not None:
         try:
@@ -434,66 +464,61 @@ def show_about(icon=None, item=None):
         except Exception:
             about_window = None
 
-    def run_about_thread():
+    win = tk.Toplevel(root_window)
+    about_window = win
+    win.withdraw()
+    win.title(f"Eyedim {APP_VERSION}")
+    win.geometry("260x280")
+    win.attributes("-topmost", True)
+    win.resizable(False, False)
+
+    win.update_idletasks()
+    try:
+        hwnd = ctypes.windll.user32.GetParent(win.winfo_id())
+        if not hwnd:
+            hwnd = win.winfo_id()
+        ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, ctypes.byref(ctypes.c_int(2)), ctypes.sizeof(ctypes.c_int))
+    except Exception:
+        pass
+
+    screen_width = win.winfo_screenwidth()
+    screen_height = win.winfo_screenheight()
+    win.geometry(f"+{screen_width // 2 - 130}+{screen_height // 2 - 140}")
+
+    frame = tk.Frame(win, padx=12, pady=12, bg="#f5f5f5")
+    win.config(bg="#f5f5f5")
+    frame.pack(fill=tk.BOTH, expand=True)
+
+    tk.Label(frame, text=f"Eyedim {APP_VERSION}", font=("Segoe UI", 11, "bold"), bg="#f5f5f5").pack(anchor="w")
+    tk.Label(frame, text=t("about_desc"), font=("Segoe UI", 8), fg="#555555", bg="#f5f5f5", justify="left", wraplength=230).pack(anchor="w", pady=(2, 6))
+
+    tk.Label(frame, text=t("about_author"), font=("Segoe UI", 8), bg="#f5f5f5", justify="left").pack(anchor="w", pady=(0, 4))
+    tk.Label(frame, text=t("about_license"), font=("Segoe UI", 7), fg="#777777", bg="#f5f5f5", justify="left").pack(anchor="w", pady=(0, 6))
+
+    tk.Label(frame, text=t("about_support"), font=("Segoe UI", 8, "bold"), bg="#f5f5f5").pack(anchor="w", pady=(2, 2))
+
+    try:
+        qr_url = f"https://api.qrserver.com/v1/create-qr-code/?size=90x90&data={urllib.parse.quote(DONATE_URL)}"
+        with urllib.request.urlopen(qr_url, timeout=2) as response:
+            qr_data = response.read()
+        qr_img_raw = Image.open(io.BytesIO(qr_data))
+
+        from PIL import ImageTk
+        qr_photo = ImageTk.PhotoImage(qr_img_raw)
+
+        qr_lbl = tk.Label(frame, image=qr_photo, bg="#f5f5f5")
+        qr_lbl.image = qr_photo
+        qr_lbl.pack()
+    except Exception:
+        tk.Label(frame, text="[QR Code Loading Error]", font=("Segoe UI", 7), fg="red", bg="#f5f5f5").pack()
+
+    def on_close():
         global about_window
-        win = tk.Tk()
-        about_window = win
-        win.withdraw()
-        win.title(f"Eyedim {APP_VERSION}")
-        win.geometry("260x280")
-        win.attributes("-topmost", True)
-        win.resizable(False, False)
+        about_window = None
+        win.destroy()
 
-        win.update_idletasks()
-        try:
-            hwnd = ctypes.windll.user32.GetParent(win.winfo_id())
-            if not hwnd:
-                hwnd = win.winfo_id()
-            ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, ctypes.byref(ctypes.c_int(2)), ctypes.sizeof(ctypes.c_int))
-        except Exception:
-            pass
-
-        screen_width = win.winfo_screenwidth()
-        screen_height = win.winfo_screenheight()
-        win.geometry(f"+{screen_width // 2 - 130}+{screen_height // 2 - 140}")
-
-        frame = tk.Frame(win, padx=12, pady=12, bg="#f5f5f5")
-        win.config(bg="#f5f5f5")
-        frame.pack(fill=tk.BOTH, expand=True)
-
-        tk.Label(frame, text=f"Eyedim {APP_VERSION}", font=("Segoe UI", 11, "bold"), bg="#f5f5f5").pack(anchor="w")
-        tk.Label(frame, text=t("about_desc"), font=("Segoe UI", 8), fg="#555555", bg="#f5f5f5", justify="left", wraplength=230).pack(anchor="w", pady=(2, 6))
-
-        tk.Label(frame, text=t("about_author"), font=("Segoe UI", 8), bg="#f5f5f5", justify="left").pack(anchor="w", pady=(0, 4))
-        tk.Label(frame, text=t("about_license"), font=("Segoe UI", 7), fg="#777777", bg="#f5f5f5", justify="left").pack(anchor="w", pady=(0, 6))
-
-        tk.Label(frame, text=t("about_support"), font=("Segoe UI", 8, "bold"), bg="#f5f5f5").pack(anchor="w", pady=(2, 2))
-
-        try:
-            qr_url = f"https://api.qrserver.com/v1/create-qr-code/?size=90x90&data={urllib.parse.quote(DONATE_URL)}"
-            with urllib.request.urlopen(qr_url, timeout=2) as response:
-                qr_data = response.read()
-            qr_img_raw = Image.open(io.BytesIO(qr_data))
-
-            from PIL import ImageTk
-            qr_photo = ImageTk.PhotoImage(qr_img_raw)
-
-            qr_lbl = tk.Label(frame, image=qr_photo, bg="#f5f5f5")
-            qr_lbl.image = qr_photo
-            qr_lbl.pack()
-        except Exception:
-            tk.Label(frame, text="[QR Code Loading Error]", font=("Segoe UI", 7), fg="red", bg="#f5f5f5").pack()
-
-        def on_close():
-            global about_window
-            about_window = None
-            win.destroy()
-
-        win.protocol("WM_DELETE_WINDOW", on_close)
-        win.deiconify()
-        win.mainloop()
-
-    threading.Thread(target=run_about_thread, daemon=True).start()
+    win.protocol("WM_DELETE_WINDOW", on_close)
+    win.deiconify()
 
 class ThinSlider(tk.Canvas):
     def __init__(self, parent, from_=0, to=100, command=None, initial=0):
@@ -524,7 +549,7 @@ class ThinSlider(tk.Canvas):
         w = self.winfo_width()
         h = self.winfo_height()
 
-        thumb_size = 12  # Round thumb diameter
+        thumb_size = 12
         margin = thumb_size // 2 + 2
 
         line_y = h // 2
@@ -535,17 +560,14 @@ class ThinSlider(tk.Canvas):
         else:
             pos = margin
 
-        # 1. Filled (passed) part of the line in amber
         if pos > margin:
             self.create_rectangle(margin, line_y - 1, pos, line_y + 1,
                                   fill="#ffb74d", outline="")
 
-        # 2. Remaining (not passed) part of the line in gray
         if pos < w - margin:
             self.create_rectangle(pos, line_y - 1, w - margin, line_y + 1,
                                   fill="#cccccc", outline="")
 
-        # 3. Round thumb
         self.create_oval(
             pos - thumb_size // 2, line_y - thumb_size // 2,
             pos + thumb_size // 2, line_y + thumb_size // 2,
@@ -575,14 +597,17 @@ class ThinSlider(tk.Canvas):
         self.set(self._value + delta * 3, update_command=True)
 
 def show_popup(icon=None, item=None):
-    global popup_window, brightness_slider_ref, night_slider_ref, contrast_slider_ref, brightness_label_ref, night_label_ref, contrast_label_ref, preset_btn_ref
+    ui_call(_show_popup_ui)
+
+def _show_popup_ui():
+    global popup_window, brightness_slider_ref, night_slider_ref, contrast_slider_ref, brightness_label_ref, night_label_ref, contrast_label_ref
     if popup_window is not None:
         close_popup()
         return
 
     close_about()
 
-    popup_window = tk.Tk()
+    popup_window = tk.Toplevel(root_window)
     popup_window.title(t("window_title"))
     popup_window.geometry("220x140")
     popup_window.attributes("-topmost", True)
@@ -608,7 +633,6 @@ def show_popup(icon=None, item=None):
 
     frame.columnconfigure(1, weight=1)
 
-    # Brightness control row
     canvas_sun = tk.Canvas(frame, width=24, height=22, bg="#f5f5f5", highlightthickness=0)
     canvas_sun.grid(row=0, column=0, sticky="w", padx=(0, 2))
     draw_vector_sun(canvas_sun, 12, 11)
@@ -619,7 +643,6 @@ def show_popup(icon=None, item=None):
     brightness_label_ref = tk.Label(frame, text=f"{current_brightness}", font=("Segoe UI Light", 10), bg="#f5f5f5", width=3, anchor="e")
     brightness_label_ref.grid(row=0, column=2, sticky="e")
 
-    # Night light control row
     canvas_moon = tk.Canvas(frame, width=24, height=22, bg="#f5f5f5", highlightthickness=0)
     canvas_moon.grid(row=1, column=0, sticky="w", padx=(0, 2), pady=(4, 0))
     draw_vector_moon(canvas_moon, 12, 11)
@@ -630,7 +653,6 @@ def show_popup(icon=None, item=None):
     night_label_ref = tk.Label(frame, text=f"{current_night_light}", font=("Segoe UI Light", 10), bg="#f5f5f5", width=3, anchor="e")
     night_label_ref.grid(row=1, column=2, sticky="e", pady=(4, 0))
 
-    # Contrast control row
     canvas_contrast = tk.Canvas(frame, width=24, height=22, bg="#f5f5f5", highlightthickness=0)
     canvas_contrast.grid(row=2, column=0, sticky="w", padx=(0, 2), pady=(4, 0))
     draw_vector_contrast(canvas_contrast, 12, 11)
@@ -641,7 +663,6 @@ def show_popup(icon=None, item=None):
     contrast_label_ref = tk.Label(frame, text=f"{current_contrast}", font=("Segoe UI Light", 10), bg="#f5f5f5", width=3, anchor="e")
     contrast_label_ref.grid(row=2, column=2, sticky="e", pady=(4, 0))
 
-    # Mode toggle button
     btn_canvas = tk.Canvas(frame, height=26, bg="#f5f5f5", highlightthickness=0, cursor="hand2")
     btn_canvas.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(8, 0))
 
@@ -683,19 +704,24 @@ def show_popup(icon=None, item=None):
 
     popup_window.bind("<FocusOut>", lambda e: close_popup())
     popup_window.focus_force()
-    popup_window.mainloop()
 
 def quit_app(icon, item):
     global current_night_light, current_contrast
     current_night_light = 0
     current_contrast = 50
     request_gamma_update(current_night_light, current_contrast)
-    
-    # Properly destroy open UI windows and perform immediate exit
-    close_popup()
-    close_about()
-    icon.stop()
-    os._exit(0)
+
+    def shutdown():
+        close_popup()
+        close_about()
+        try:
+            root_window.quit()
+            root_window.destroy()
+        except Exception:
+            pass
+        icon.stop()
+
+    ui_call(shutdown)
 
 tray_icon_ref = pystray.Icon(
     "Eyedim",
@@ -712,4 +738,7 @@ tray_icon_ref = pystray.Icon(
 )
 
 tray_icon_ref.default_action = show_popup
+
+# Run the tray icon in the main thread. Tkinter runs its own mainloop
+# in a separate daemon thread (see tk_thread_main above).
 tray_icon_ref.run()
