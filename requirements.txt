@@ -1,0 +1,4 @@
+pystray
+pillow
+screen-brightness-control
+pywin32
