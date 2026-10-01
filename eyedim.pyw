@@ -19,7 +19,7 @@ import time
 
 # --- SYSTEM CONSTANTS ---
 DWMWA_WINDOW_CORNER_PREFERENCE = 33  # Window corner rounding preference for Win11
-APP_VERSION = "v2.0.4"
+APP_VERSION = "v2.0.5"
 DONATE_URL = "https://your-donation-link.com"  # Insert your payment link here
 
 # --- GAMMA SAFETY LIMITS ---
@@ -369,7 +369,11 @@ def create_text_icon(brightness_val):
     image = Image.new('RGBA', (64, 64), (0, 0, 0, 0))
     dc = ImageDraw.Draw(image)
 
-    dc.rectangle([2, 4, 62, 60], outline=(255, 200, 50, 255), width=3)
+    # Draw only the top and bottom horizontal lines
+    line_color = (255, 200, 50, 255)
+    line_width = 3
+    dc.line([(2, 4), (62, 4)], fill=line_color, width=line_width)
+    dc.line([(2, 60), (62, 60)], fill=line_color, width=line_width)
 
     text = f"{int(brightness_val)}"
     if len(text) == 1:
@@ -526,30 +530,38 @@ class ThinSlider(tk.Canvas):
         w = self.winfo_width()
         h = self.winfo_height()
 
-        thumb_w = 16
-        thumb_h = 8
-        margin = thumb_w // 2 + 1
+        thumb_size = 12  # Диаметр круглого ползунка
+        margin = thumb_size // 2 + 2
 
         line_y = h // 2
-        self.create_rectangle(margin, line_y - 1, w - margin, line_y + 1,
-                              fill="#cccccc", outline="")
-
         inner_w = w - 2 * margin
+        
         if self.to > self.from_ and inner_w > 0:
             pos = margin + (inner_w * (self._value - self.from_) / (self.to - self.from_))
         else:
             pos = margin
 
-        self.create_rectangle(
-            pos - thumb_w // 2, line_y - thumb_h // 2,
-            pos + thumb_w // 2, line_y + thumb_h // 2,
+        # 1. Заливка пройденной части линии (янтарный цвет)
+        if pos > margin:
+            self.create_rectangle(margin, line_y - 1, pos, line_y + 1,
+                                  fill="#ffb74d", outline="")
+        
+        # 2. Оставшаяся не пройденная часть линии (серая)
+        if pos < w - margin:
+            self.create_rectangle(pos, line_y - 1, w - margin, line_y + 1,
+                                  fill="#cccccc", outline="")
+
+        # 3. Круглый ползунок
+        self.create_oval(
+            pos - thumb_size // 2, line_y - thumb_size // 2,
+            pos + thumb_size // 2, line_y + thumb_size // 2,
             fill="#ffffff", outline="#888888", width=1
         )
 
     def _update_from_event(self, event):
         w = self.winfo_width()
-        thumb_w = 16
-        margin = thumb_w // 2 + 1
+        thumb_size = 12
+        margin = thumb_size // 2 + 2
         inner_w = w - 2 * margin
         if inner_w <= 0:
             return
@@ -635,14 +647,51 @@ def show_popup(icon=None, item=None):
     contrast_label_ref = tk.Label(frame, text=f"{current_contrast}", font=("Segoe UI Light", 10), bg="#f5f5f5", width=3, anchor="e")
     contrast_label_ref.grid(row=2, column=2, sticky="e", pady=(4, 0))
 
-    # Mode toggle button
+    # Mode toggle button - Style 4 (Rounded / Minimalist)
     btn_text = t("mode_default") if preset_active else t("mode_user")
-    btn_bg = "#ffe0b2" if preset_active else "#e0e0e0"
-    preset_btn_ref = tk.Button(
-        frame, text=btn_text, font=("Segoe UI", 9), bg=btn_bg, relief=tk.FLAT,
-        command=toggle_preset, cursor="hand2"
-    )
-    preset_btn_ref.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(8, 0))
+    
+    # Цвета для режимов и эффектов наведения
+    bg_color = "#ffe0b2" if preset_active else "#f0f0f0"
+    hover_color = "#ffd54f" if preset_active else "#e0e0e0"
+    text_color = "#e65100" if preset_active else "#555555"
+
+    # Создаем Canvas вместо стандартной кнопки для реализации скругленных углов
+    btn_canvas = tk.Canvas(frame, height=26, bg="#f5f5f5", highlightthickness=0, cursor="hand2")
+    btn_canvas.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(8, 0))
+
+    def draw_rounded_btn(bg_col):
+        btn_canvas.delete("all")
+        w = btn_canvas.winfo_width()
+        h = btn_canvas.winfo_height()
+        if w <= 1:
+            w = 200  # Дефолтная ширина до отрисовки
+        
+        radius = 6  # Радиус скругления углов
+        
+        # Рисуем скругленный прямоугольник через дуги и линии
+        btn_canvas.create_arc(0, 0, radius*2, radius*2, start=90, extent=90, fill=bg_col, outline="")
+        btn_canvas.create_arc(w - radius*2, 0, w, radius*2, start=0, extent=90, fill=bg_col, outline="")
+        btn_canvas.create_arc(0, h - radius*2, radius*2, h, start=180, extent=90, fill=bg_col, outline="")
+        btn_canvas.create_arc(w - radius*2, h - radius*2, w, h, start=270, extent=90, fill=bg_col, outline="")
+        
+        btn_canvas.create_rectangle(radius, 0, w - radius, h, fill=bg_col, outline="")
+        btn_canvas.create_rectangle(0, radius, w, h - radius, fill=bg_col, outline="")
+        
+        # Текст по центру кнопки
+        btn_canvas.create_text(w / 2, h / 2, text=btn_text, fill=text_color, font=("Segoe UI", 9, "bold"))
+
+    # События отрисовки и наведения мыши
+    btn_canvas.bind("<Configure>", lambda e: draw_rounded_btn(bg_color))
+    btn_canvas.bind("<Enter>", lambda e: draw_rounded_btn(hover_color))
+    btn_canvas.bind("<Leave>", lambda e: draw_rounded_btn(bg_color))
+    
+    # Клик по кнопке (переключение режима)
+    def on_btn_click(e):
+        toggle_press = globals().get('toggle_preset')
+        if toggle_press:
+            toggle_press()
+            
+    btn_canvas.bind("<Button-1>", on_btn_click)
 
     popup_window.bind("<FocusOut>", lambda e: close_popup())
     popup_window.focus_force()
