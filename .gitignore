@@ -216,3 +216,8 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# UPX (external tool, not part of the project)
+upx.exe
+upx-*.zip
+upx-*/

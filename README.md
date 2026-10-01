@@ -47,8 +47,19 @@ The app starts minimized in the system tray. Left-click the tray icon to open th
 
 ```bash
 pip install pyinstaller
-pyinstaller --noconsole --onefile --name Eyedim Eyedim.pyw
+py -3.13 -m PyInstaller --noconsole --onefile --upx-dir=. --upx-exclude=vcruntime140.dll --icon=icon.ico eyedim.pyw
 ```
+
+> **Note:** The build was tested with **Python 3.13** and **[UPX 5.2.1](https://github.com/upx/upx/releases/tag/v5.2.1)**.
+>
+> UPX is used to compress the resulting `.exe`. It is **not** bundled with the project — download it separately:
+>
+> 1. Go to the [UPX releases page](https://github.com/upx/upx/releases).
+> 2. Download `upx-5.2.1-win64.zip`.
+> 3. Extract `upx.exe` into the project folder (the same directory as `Eyedim.pyw`).
+> 4. Run the build command above.
+>
+> If you don't want to use UPX at all, simply remove the `--upx-dir=.` and `--upx-exclude=vcruntime140.dll` flags. The build will still succeed, just produce a larger `.exe`.
 
 ## ⚠️ Note on antivirus
 
