@@ -44,13 +44,26 @@ h1{font-size:clamp(34px,5vw,54px);line-height:1.08;margin:0 0 18px;font-weight:8
 .scr .code{margin-top:12px;background:#0f1726;color:#9fd0ff;border-radius:6px;padding:8px;font:11px/1.5 Consolas,monospace}
 .warm{position:absolute;inset:0;background:#ff9a2e;mix-blend-mode:multiply;pointer-events:none;opacity:0}
 .neck{width:13%;height:34px;margin:0 auto;background:linear-gradient(90deg,#1a2740,#2d4063,#1a2740)}.base{width:34%;height:10px;margin:0 auto;background:linear-gradient(#3a4f75,#1c2a44);border-radius:6px 6px 14px 14px}
-.pop{width:min(310px,92%);margin:20px 0 0 auto;position:relative;background:#f4f4f6;color:#222;border-radius:10px;padding:14px 16px;box-shadow:0 14px 36px rgba(0,0,0,.45)}
-.sl{display:grid;grid-template-columns:24px 1fr 30px;align-items:center;gap:10px;margin:6px 0}
+.pop{font-family:"Segoe UI",system-ui,sans-serif;width:min(310px,92%);margin:20px 0 0 auto;position:relative;background:#f4f4f6;color:#222;border-radius:10px;padding:14px 16px;box-shadow:0 14px 36px rgba(0,0,0,.45)}
+.sl{display:grid;grid-template-columns:24px 1fr 30px;align-items:center;gap:10px;margin:2px 0}
 .sl svg{width:22px;height:22px}
 .sl output{text-align:right;font-size:14px;font-variant-numeric:tabular-nums}
-input[type=range]{width:100%;accent-color:#d98a12;min-width:0}
+input[type=range]{-webkit-appearance:none;appearance:none;width:100%;min-width:0;height:18px;margin:0;background:transparent}
+input[type=range]::-webkit-slider-runnable-track{height:2px;background:linear-gradient(90deg,#d98a12 var(--v,50%),#ccc var(--v,50%))}
+input[type=range]::-moz-range-track{height:2px;background:#ccc}
+input[type=range]::-moz-range-progress{height:2px;background:#d98a12}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:12px;height:12px;border-radius:50%;background:#d98a12;margin-top:-5px}
+input[type=range]::-moz-range-thumb{width:12px;height:12px;border:0;border-radius:50%;background:#d98a12}
 .prof{display:flex;gap:8px;margin-top:10px}
 .prof button{flex:1;display:flex;align-items:center;justify-content:center;gap:8px;border:0;border-radius:6px;background:#dcdce0;color:#222;padding:9px;font:inherit;font-size:14px;cursor:pointer}.prof button:hover{background:#d0d0d6}.prof svg{width:16px;height:16px}
+.prof #ct{flex:0 0 40px;padding:0}.prof #ct[aria-pressed=true]{background:#f6dfb8}.prof #ct[aria-pressed=true]:hover{background:#efd29a}
+.cur{position:absolute;left:0;top:0;z-index:5;pointer-events:none;opacity:0;transition:opacity .4s;will-change:transform}
+.cur svg{display:block;width:22px;height:22px;margin:-2px 0 0 -3px;filter:drop-shadow(0 2px 3px rgba(0,0,0,.55))}
+.cur .ring{position:absolute;left:0;top:0;width:40px;height:40px;margin:-20px 0 0 -20px;border:3px solid #f2a93b;border-radius:50%;box-shadow:0 0 16px rgba(242,169,59,.8);opacity:0;transform:scale(.4)}
+.cur.down .ring{opacity:.9;transform:scale(.75)}
+.cur.burst .ring{animation:rip .6s ease-out}
+@keyframes rip{0%{opacity:1;transform:scale(.3)}100%{opacity:0;transform:scale(1.6)}}
+@media (prefers-reduced-motion:reduce){.cur{display:none}}
 .dnote{font-size:13px;color:var(--mute);margin:14px 0 0}
 .dnote button{background:none;border:0;color:var(--amber);cursor:pointer;font:inherit;text-decoration:underline;padding:0 0 0 6px}
 /* sections */
@@ -58,6 +71,10 @@ section{padding:56px 0;border-top:1px solid var(--line)}
 h2{font-size:clamp(26px,3.4vw,36px);margin:0 0 14px;line-height:1.15;letter-spacing:-.01em}
 .prob p{max-width:36em;color:var(--mute);font-size:19px;margin:0}
 .cols{display:grid;grid-template-columns:repeat(3,1fr);gap:28px;margin-top:8px}
+.cols>div{padding:22px;border:1px solid rgba(242,169,59,.7);border-radius:14px;background:rgba(242,169,59,.05);box-shadow:0 0 0 1px rgba(242,169,59,.12),0 0 28px rgba(242,169,59,.14);transition:border-color .2s,box-shadow .2s}
+.cols>div:hover{border-color:var(--amber);box-shadow:0 0 0 1px rgba(242,169,59,.3),0 0 34px rgba(242,169,59,.22)}
+.chips li{border-color:rgba(242,169,59,.55)!important;color:var(--text)!important}
+@media (prefers-reduced-motion:reduce){.cols>div{transition:none}}
 .cols h3{margin:0 0 6px;font-size:19px;color:var(--amber)}
 .cols p{margin:0;color:var(--mute);font-size:16px}
 .lim ul{margin:0;padding-left:20px;color:var(--mute);max-width:44em}
@@ -82,12 +99,13 @@ footer a{color:var(--mute)}
     <h1 data-i="h1"></h1>
     <p class="lead" data-i="lead"></p>
     <a class="btn" id="dl" href="https://github.com/proyarik/eyedim/releases/latest" data-i="dl"></a>
-    <div class="meta"><span>Windows 10/11</span><span>v2.0.7</span><span data-i="size"></span></div>
+    <div class="meta"><span>Windows 10/11</span><span>v2.0.8</span><span data-i="size"></span></div>
     <ul class="chips"><li data-i="c1"></li><li data-i="c2"></li><li data-i="c3"></li><li data-i="c4"></li><li data-i="c5"></li><li data-i="c6"></li></ul>
     <p class="note" data-i="warn"></p>
   </div>
 
   <div class="demo">
+    <div class="cur" id="cur" aria-hidden="true"><div class="ring"></div><svg viewBox="0 0 24 24"><path d="M3 2l15 9-6.5 1.5L8 19z" fill="#fff" stroke="#111" stroke-width="1.4" stroke-linejoin="round"/></svg></div>
     <div class="mon"><div class="scr" id="scr">
       <div class="c" id="cont">
         <div class="bar"></div><div class="ln"></div><div class="ln" style="width:92%"></div><div class="ln" style="width:75%"></div>
@@ -100,10 +118,10 @@ footer a{color:var(--mute)}
     <div class="pop">
       <div class="sl"><svg viewBox="0 0 24 24" fill="#f2a93b" aria-hidden="true"><circle cx="12" cy="12" r="5"/><g stroke="#f2a93b" stroke-width="2" stroke-linecap="round"><path d="M12 1v3M12 20v3M1 12h3M20 12h3M4 4l2 2M18 18l2 2M4 20l2-2M18 6l2-2"/></g></svg><input type="range" id="b" min="0" max="100" aria-label="Brightness"><output id="bo"></output></div>
       <div class="sl"><svg viewBox="0 0 24 24" fill="#2f5fd0" aria-hidden="true"><path d="M20 15A9 9 0 0 1 9 4a9 9 0 1 0 11 11z"/></svg><input type="range" id="n" min="0" max="100" aria-label="Night light"><output id="no"></output></div>
-      <div class="sl"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" fill="none" stroke="#444" stroke-width="2"/><path d="M12 3a9 9 0 0 1 0 18z" fill="#444"/></svg><input type="range" id="c" min="0" max="100" aria-label="Contrast"><output id="co"></output></div>
-      <div class="prof"><button type="button" id="mode"><svg viewBox="0 0 24 24" fill="none" stroke="#2f5fd0" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M5 19l2-2M17 7l2-2"/></svg><span id="ml"></span></button></div>
+      <div class="sl" id="crow" style="display:none"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" fill="none" stroke="#444" stroke-width="2"/><path d="M12 3a9 9 0 0 1 0 18z" fill="#444"/></svg><input type="range" id="c" min="0" max="100" aria-label="Contrast"><output id="co"></output></div>
+      <div class="prof"><button type="button" id="mode"><svg viewBox="0 0 24 24" fill="none" stroke="#2f5fd0" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M5 19l2-2M17 7l2-2"/></svg><span id="ml"></span></button><button type="button" id="ct" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true" style="width:18px;height:18px"><circle cx="12" cy="12" r="9" fill="none" stroke="#444" stroke-width="2"/><path d="M12 3a9 9 0 0 1 0 18z" fill="#444"/></svg></button></div>
     </div>
-    <p class="dnote"><span data-i="approx"></span></p>
+    <p class="dnote"><span data-i="hint"></span> <span data-i="approx"></span></p>
   </div>
 </div>
 
@@ -132,7 +150,7 @@ footer a{color:var(--mute)}
   <a class="btn alt" href="https://github.com/proyarik/eyedim" data-i="gh"></a>
 </section>
 
-<footer><span>© 2026 <a href="https://github.com/proyarik">proyarik</a>. Eyedim v2.0.7</span><span>GPL-3.0</span><a href="https://github.com/proyarik/eyedim">GitHub</a></footer>
+<footer><span>© 2026 <a href="https://github.com/proyarik">proyarik</a>. Eyedim v2.0.8</span><span>GPL-3.0</span><a href="https://github.com/proyarik/eyedim">GitHub</a></footer>
 </div>
 
 <script>
@@ -140,9 +158,9 @@ var T={
 ru:{h1:"Яркость, ночной свет и контраст: настройка за секунду",lead:"Свой и стандартный режимы переключаются одним щелчком из трея. Чтобы глаза не уставали.",dl:"Скачать бесплатно",size:"14,8 МБ",
 c1:"Без рекламы",c2:"Без регистрации",c3:"Не собирает данные",c4:"Работает без интернета",c5:"Установка не нужна",c6:"Открытый код",
 warn:"Файл не подписан, поэтому Windows или антивирус могут показать предупреждение. Нажмите «Подробнее» и «Выполнить в любом случае». Код открыт, его можно проверить и собрать самому.",
-mu:"Режим: Пользователь",md:"Режим: По умолчанию",approx:"Примерный эффект: в браузере он лишь похож на работу программы.",
+mu:"Режим: Пользователь",md:"Режим: По умолчанию",approx:"Примерный эффект: в браузере он лишь похож на работу программы.",hint:"Демо играет само. Двигайте ползунки, чтобы попробовать.",
 ph:"К вечеру глаза горят?",pp:"Экран светит одинаково ярко в полдень и в одиннадцать вечера. Eyedim за секунду подстроит яркость, тёплый свет и контраст под время суток, и лезть в настройки монитора не нужно.",
-f1h:"Три ползунка",f1p:"Яркость, ночной свет и контраст в одном маленьком окошке. Ничего лишнего.",
+f1h:"Два ползунка и контраст по желанию",f1p:"Яркость и ночной свет всегда под рукой, а контраст включается кнопкой в окошке.",ct1:"Показать контраст",ct2:"Скрыть контраст",
 f2h:"Два режима",f2p:"Свой и стандартный. Настройте один раз и переключайтесь одним щелчком.",
 f3h:"Всегда в трее",f3p:"Значок показывает текущую яркость, запускается вместе с Windows и занимает около 50–60 МБ памяти.",
 lh:"Честно об ограничениях",
@@ -153,9 +171,9 @@ fh:"Eyedim бесплатна",fp:"Windows 10/11, 14,8 МБ, без устано
 en:{h1:"Brightness, night light and contrast: set in a second",lead:"Your own and the default mode switch with one click from the tray. Easier on your eyes.",dl:"Download free",size:"14.8 MB",
 c1:"No ads",c2:"No sign-up",c3:"No data collection",c4:"Works offline",c5:"No installation",c6:"Open source",
 warn:"The file is not code-signed, so Windows or your antivirus may show a warning. Click “More info” and “Run anyway”. The code is open: you can inspect it and build it yourself.",
-mu:"Mode: User",md:"Mode: Default",approx:"Approximate effect: in the browser it only resembles what the app does.",
+mu:"Mode: User",md:"Mode: Default",approx:"Approximate effect: in the browser it only resembles what the app does.",hint:"The demo plays on its own. Move the sliders to try it.",
 ph:"Eyes burning by evening?",pp:"Your screen is just as bright at noon as at eleven at night. Eyedim adjusts brightness, warm light and contrast to the time of day in a second, with no digging through monitor menus.",
-f1h:"Three sliders",f1p:"Brightness, night light and contrast in one small window. Nothing extra.",
+f1h:"Two sliders, contrast on demand",f1p:"Brightness and night light are always at hand, and contrast is one button away in the window.",ct1:"Show contrast",ct2:"Hide contrast",
 f2h:"Two modes",f2p:"Your own and the default. Set up once, switch with one click.",
 f3h:"Always in the tray",f3p:"The icon shows current brightness, starts with Windows and uses about 50–60 MB of memory.",
 lh:"Honest limitations",
@@ -163,32 +181,81 @@ l1:"External monitor brightness is set over DDC/CI. Some models need it enabled 
 l2:"Night light and contrast are software-based: they change gamma through the graphics card and work on any monitor, but they don't extend its capabilities.",
 l3:"In HDR mode and alongside other tools that change gamma (such as f.lux), the effect may not apply.",
 fh:"Eyedim is free",fp:"Windows 10/11, 14.8 MB, no installation. Source code is open.",gh:"Code on GitHub"}};
-var P={def:[100,0,50],usr:[55,55,45]},cur=P.def.slice(),mode="def",lang="en",raf;
+var P={def:[80,10,50],usr:[80,10,50]},cur=P.def.slice(),mode="def",lang="en",raf,ctOn=false;
 var el=function(i){return document.getElementById(i)},ids=["b","n","c"];
 function apply(){
- el("cont").style.filter="brightness("+(0.3+0.7*cur[0]/100)+") contrast("+(0.6+0.8*cur[2]/100)+")";
+ el("cont").style.filter="brightness("+(0.3+0.7*cur[0]/100)+") contrast("+(0.6+0.8*(ctOn?cur[2]:50)/100)+")";
  el("warm").style.opacity=cur[1]/100*0.5;
- ids.forEach(function(k,j){el(k).value=Math.round(cur[j]);el(k+"o").textContent=Math.round(cur[j])});
+ ids.forEach(function(k,j){el(k).value=Math.round(cur[j]);el(k+"o").textContent=Math.round(cur[j]);el(k).style.setProperty("--v",Math.round(cur[j])+"%")});
 }
 function mark(p){mode=p;el("ml").textContent=T[lang][p==="usr"?"mu":"md"]}
-function go(p){
- var from=cur.slice(),to=P[p],t0=performance.now();mark(p);cancelAnimationFrame(raf);
+function animTo(to,dur){var from=cur.slice(),t0=performance.now();cancelAnimationFrame(raf);
  var reduce=matchMedia("(prefers-reduced-motion: reduce)").matches;
- (function step(t){var k=reduce?1:Math.min(1,(t-t0)/450);
+ (function step(t){var k=reduce?1:Math.min(1,(t-t0)/(dur||450));
   cur=from.map(function(v,j){return v+(to[j]-v)*k});apply();if(k<1)raf=requestAnimationFrame(step)})(t0);
 }
+function go(p,dur){mark(p);animTo(P[p],dur)}
 ids.forEach(function(k,j){el(k).addEventListener("input",function(){cur[j]=+this.value;P.usr=cur.slice();mark("usr");apply()})});
 el("mode").addEventListener("click",function(){go(mode==="usr"?"def":"usr")});
+function ctUI(){el("crow").style.display=ctOn?"":"none";var b=el("ct"),t=T[lang][ctOn?"ct2":"ct1"];b.setAttribute("aria-pressed",ctOn);b.title=t;b.setAttribute("aria-label",t);apply()}
+el("ct").addEventListener("click",function(){ctOn=!ctOn;ctUI()});
 function setLang(l){lang=l;document.documentElement.lang=l;
  document.querySelectorAll("[data-i]").forEach(function(e){e.textContent=T[l][e.dataset.i]});
  document.querySelectorAll("[data-l]").forEach(function(b){b.setAttribute("aria-pressed",b.dataset.l===l)});
- mark(mode);document.title="Eyedim: "+T[l].h1;
+ mark(mode);ctUI();document.title="Eyedim: "+T[l].h1;
  try{localStorage.setItem("lang",l)}catch(e){}}
 document.querySelectorAll("[data-l]").forEach(function(b){b.addEventListener("click",function(){setLang(b.dataset.l)})});
 var s=null;try{s=localStorage.getItem("lang")}catch(e){}
 var nl=((navigator.languages&&navigator.languages[0])||navigator.language||"en").toLowerCase();
 setLang(s==="ru"||s==="en"?s:(nl.indexOf("ru")===0?"ru":"en"));
 apply();
+/* self-playing demo with a fake mouse pointer; pauses when the visitor touches it */
+var reduceM=matchMedia("(prefers-reduced-motion: reduce)").matches,auto=!reduceM,tok=0,idleT=null,vis=true,
+ demo=document.querySelector(".demo"),curEl=el("cur"),cx=0,cy=0;
+function setCt(v){ctOn=v;ctUI()}
+function setCur(x,y){cx=x;cy=y;curEl.style.transform="translate("+x+"px,"+y+"px)"}
+function wait(ms,t){return new Promise(function(res){setTimeout(function(){res(t===tok)},ms)})}
+function tween(dur,t,fn){return new Promise(function(res){var t0=performance.now();
+ (function f(n){if(t!==tok)return res(false);var k=Math.min(1,(n-t0)/dur),e=k<.5?2*k*k:1-Math.pow(-2*k+2,2)/2;
+  fn(e);if(k<1)requestAnimationFrame(f);else res(true)})(t0)})}
+function moveTo(x,y,dur,t){var x0=cx,y0=cy;return tween(dur,t,function(e){setCur(x0+(x-x0)*e,y0+(y-y0)*e)})}
+function burst(){curEl.classList.remove("burst");void curEl.offsetWidth;curEl.classList.add("burst")}
+function down(v){curEl.classList.toggle("down",v);if(v)burst()}
+function thumbPos(inp,v){var r=inp.getBoundingClientRect(),d=demo.getBoundingClientRect();
+ return{x:r.left-d.left+6+(r.width-12)*v/100,y:r.top-d.top+r.height/2}}
+async function drag(k,to,t){
+ var j=ids.indexOf(k),inp=el(k),p=thumbPos(inp,cur[j]);
+ if(!await moveTo(p.x,p.y,800,t))return false;
+ down(true);var from=cur[j];
+ var ok=await tween(1100,t,function(q){cur[j]=from+(to-from)*q;P.usr=cur.slice();mark("usr");apply();
+  var u=thumbPos(inp,cur[j]);setCur(u.x,u.y)});
+ down(false);return ok}
+async function clickEl(id,t){
+ var r=el(id).getBoundingClientRect(),d=demo.getBoundingClientRect();
+ if(!await moveTo(r.left+r.width*.55-d.left,r.top+r.height*.5-d.top,900,t))return false;
+ burst();if(!await wait(180,t))return false;
+ el(id).click();return wait(300,t)}
+async function script(t){
+ var r=el("scr").getBoundingClientRect(),d=demo.getBoundingClientRect();
+ setCur(r.left-d.left+r.width*.75,r.top-d.top+r.height*.7);
+ P.usr=[80,10,50];setCt(false);go("def",700);
+ var steps=[function(){return wait(900,t)},function(){return drag("b",45,t)},function(){return wait(500,t)},
+  function(){return drag("n",60,t)},function(){return wait(500,t)},function(){return clickEl("ct",t)},
+  function(){return wait(500,t)},function(){return drag("c",72,t)},function(){return wait(900,t)},
+  function(){return clickEl("ct",t)},function(){return wait(900,t)},function(){return clickEl("mode",t)},
+  function(){return wait(1500,t)},function(){return clickEl("mode",t)},function(){return wait(1500,t)},
+  function(){return clickEl("mode",t)},function(){return wait(1600,t)}];
+ for(var i=0;i<steps.length;i++){if(!await steps[i]())return false}
+ return true}
+async function loop(t){while(t===tok&&auto&&vis&&!document.hidden){if(!await script(t))return}}
+function stopAuto(){tok++;cancelAnimationFrame(raf);curEl.classList.remove("down");curEl.style.opacity=0}
+function startAuto(){if(!auto||!vis||document.hidden)return;stopAuto();var t=tok;curEl.style.opacity=1;loop(t)}
+function touched(){auto=false;stopAuto();clearTimeout(idleT);if(reduceM)return;
+ idleT=setTimeout(function(){auto=true;startAuto()},12000)}
+["pointerdown","keydown","input"].forEach(function(e){demo.addEventListener(e,touched)});
+document.addEventListener("visibilitychange",function(){if(document.hidden)stopAuto();else startAuto()});
+if("IntersectionObserver" in window){new IntersectionObserver(function(en){vis=en[0].isIntersecting;if(vis)startAuto();else stopAuto()}).observe(el("scr"))}
+else setTimeout(startAuto,1200);
 </script>
 </body>
 </html>
