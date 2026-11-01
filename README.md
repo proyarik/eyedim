@@ -25,7 +25,7 @@ Lightweight Windows utility to control display **brightness**, **night light** a
 
 [![Download Eyedim.exe](https://img.shields.io/badge/Download-Eyedim.exe-brightgreen?style=for-the-badge&logo=windows)](https://github.com/proyarik/eyedim/releases/latest)
 
-Latest version: **v2.0.10**
+Latest version: **v2.1.0**
 
 ## Installation
 
