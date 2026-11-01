@@ -17,6 +17,8 @@ import urllib.parse
 import io
 import json
 import time
+import functools
+from array import array
 
 # --- SYSTEM CONSTANTS ---
 DWMWA_WINDOW_CORNER_PREFERENCE = 33
@@ -153,7 +155,6 @@ if _first_run or _cfg.get("clean_exit", True) or not isinstance(_orig, list) or 
 else:
     original_brightness = _orig
 
-_save_timer = None
 _reapply_timer = None
 mode_btn_redraw_ref = None
 
@@ -178,13 +179,24 @@ def save_config(clean_exit=False):
     except Exception:
         pass
 
+SAVE_DELAY = 0.5
+_save_requested = threading.Event()
+
+def _save_worker():
+    # Debounced writer: saves once the settings have been quiet for SAVE_DELAY.
+    while True:
+        _save_requested.wait()
+        while True:
+            _save_requested.clear()
+            time.sleep(SAVE_DELAY)
+            if not _save_requested.is_set():
+                break
+        save_config()
+
+threading.Thread(target=_save_worker, daemon=True).start()
+
 def schedule_save():
-    global _save_timer
-    if _save_timer:
-        _save_timer.cancel()
-    _save_timer = threading.Timer(0.5, save_config)
-    _save_timer.daemon = True
-    _save_timer.start()
+    _save_requested.set()
 
 popup_window = None
 about_window = None
@@ -221,25 +233,25 @@ def ui_call(fn, *args, **kwargs):
 # --- AUTOSTART ---
 def is_autostart_enabled():
     try:
-        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, startup_registry_key, 0, winreg.KEY_READ)
-        winreg.QueryValueEx(key, app_name)
-        winreg.CloseKey(key)
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, startup_registry_key, 0,
+                            winreg.KEY_READ) as key:
+            winreg.QueryValueEx(key, app_name)
         return True
     except Exception:
         return False
 
 def toggle_autostart(icon, item):
     try:
-        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, startup_registry_key, 0, winreg.KEY_SET_VALUE)
-        if is_autostart_enabled():
-            winreg.DeleteValue(key, app_name)
-        else:
-            if getattr(sys, 'frozen', False):
-                app_path = f'"{sys.executable}"'
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, startup_registry_key, 0,
+                            winreg.KEY_SET_VALUE) as key:
+            if is_autostart_enabled():
+                winreg.DeleteValue(key, app_name)
             else:
-                app_path = f'"{sys.executable}" "{os.path.abspath(__file__)}"'
-            winreg.SetValueEx(key, app_name, 0, winreg.REG_SZ, app_path)
-        winreg.CloseKey(key)
+                if getattr(sys, 'frozen', False):
+                    app_path = f'"{sys.executable}"'
+                else:
+                    app_path = f'"{sys.executable}" "{os.path.abspath(__file__)}"'
+                winreg.SetValueEx(key, app_name, 0, winreg.REG_SZ, app_path)
     except Exception as e:
         print(f"Autostart error: {e}")
     icon.update_menu()
@@ -264,16 +276,27 @@ def rebuild_open_windows():
     if about_was_open:
         _show_about_ui()
 
+_tray_last_icon_value = None
+_tray_last_title = None
+
 def update_tray_icon():
-    global tray_icon_ref
-    if tray_icon_ref:
+    global _tray_last_icon_value, _tray_last_title
+    if not tray_icon_ref:
+        return
+    # Rendering the PIL image and swapping the Windows icon is the expensive
+    # part, so skip it (and the tooltip) when nothing visible has changed.
+    if current_brightness != _tray_last_icon_value:
         tray_icon_ref.icon = create_text_icon(current_brightness)
-        if show_contrast:
-            tray_icon_ref.title = TRANSLATIONS[LANG]["tooltip_format"].format(
-                current_brightness, current_night_light, current_contrast)
-        else:
-            tray_icon_ref.title = TRANSLATIONS[LANG]["tooltip_format_short"].format(
-                current_brightness, current_night_light)
+        _tray_last_icon_value = current_brightness
+    if show_contrast:
+        title = TRANSLATIONS[LANG]["tooltip_format"].format(
+            current_brightness, current_night_light, current_contrast)
+    else:
+        title = TRANSLATIONS[LANG]["tooltip_format_short"].format(
+            current_brightness, current_night_light)
+    if title != _tray_last_title:
+        tray_icon_ref.title = title
+        _tray_last_title = title
 
 def update_popup_labels_and_sliders():
     global brightness_slider_ref, night_slider_ref, contrast_slider_ref
@@ -295,33 +318,29 @@ def update_popup_labels_and_sliders():
         mode_btn_redraw_ref()
 
 # --- GAMMA RAMP ---
+@functools.lru_cache(maxsize=64)
 def build_gamma_ramp(nl, c):
+    """256 R + 256 G + 256 B 16-bit little-endian values (1536 bytes)."""
     nl_factor = nl / 100.0
     c_factor = (c - 50) / 50.0
 
     gf = max(GAMMA_GREEN_MIN, 1.0 - 0.40 * nl_factor)
     bf = max(GAMMA_BLUE_MIN, 1.0 - 0.75 * nl_factor)
+    scale = 1.0 + c_factor * (0.5 if c_factor > 0 else 0.4)
 
-    ramp = bytearray(1536)
+    base = []
     for i in range(256):
-        val_base = i * 257
-
+        v = i * 257
         if c_factor != 0:
-            normalized = (val_base - 32768) / 32768.0
-            if c_factor > 0:
-                adjusted = normalized * (1.0 + c_factor * 0.5)
-            else:
-                adjusted = normalized * (1.0 + c_factor * 0.4)
-            val_base = max(0, min(65535, int(32768 + adjusted * 32768)))
+            v = max(0, min(65535, int(32768 + (v - 32768) / 32768.0 * scale * 32768)))
+        base.append(v)
 
-        r = min(65535, int(val_base * 1.0))
-        g = min(65535, int(val_base * gf))
-        b = min(65535, int(val_base * bf))
-
-        ramp[i * 2: i * 2 + 2] = r.to_bytes(2, 'little')
-        ramp[512 + i * 2: 512 + i * 2 + 2] = g.to_bytes(2, 'little')
-        ramp[1024 + i * 2: 1024 + i * 2 + 2] = b.to_bytes(2, 'little')
-    return bytes(ramp)
+    ramp = array('H', base)                               # red
+    ramp.extend(min(65535, int(v * gf)) for v in base)    # green
+    ramp.extend(min(65535, int(v * bf)) for v in base)    # blue
+    if sys.byteorder != 'little':
+        ramp.byteswap()
+    return ramp.tobytes()
 
 def apply_gamma_direct(nl, c):
     try:
@@ -605,6 +624,7 @@ def set_night_light(val):
     current_night_light = max(0, min(100, int(val)))
     request_gamma_update(nl=current_night_light)
     _commit_user_mode()
+    update_tray_icon()
     update_popup_labels_and_sliders()
 
 def set_contrast(val):
@@ -612,6 +632,7 @@ def set_contrast(val):
     current_contrast = max(0, min(100, int(val)))
     request_gamma_update(c=effective_contrast())
     _commit_user_mode()
+    update_tray_icon()
     update_popup_labels_and_sliders()
 
 def toggle_preset():
@@ -765,6 +786,8 @@ def close_about():
         about_window = None
 
 # --- ABOUT WINDOW ---
+_qr_cache = None
+
 def show_about(icon=None, item=None):
     ui_call(_show_about_ui)
 
@@ -815,19 +838,37 @@ def _show_about_ui():
     tk.Label(frame, text=t("about_support"), font=("Segoe UI", 8, "bold"),
              bg=PANEL_BG).pack(anchor="w", pady=(2, 2))
 
-    try:
-        qr_url = f"https://api.qrserver.com/v1/create-qr-code/?size=90x90&data={urllib.parse.quote(DONATE_URL)}"
-        with urllib.request.urlopen(qr_url, timeout=2) as response:
-            qr_data = response.read()
-        qr_img_raw = Image.open(io.BytesIO(qr_data))
-        from PIL import ImageTk
-        qr_photo = ImageTk.PhotoImage(qr_img_raw)
-        qr_lbl = tk.Label(frame, image=qr_photo, bg=PANEL_BG)
-        qr_lbl.image = qr_photo
-        qr_lbl.pack()
-    except Exception:
-        tk.Label(frame, text="[QR Code Loading Error]", font=("Segoe UI", 7),
-                 fg="red", bg=PANEL_BG).pack()
+    qr_lbl = tk.Label(frame, text="...", font=("Segoe UI", 7), fg="#777777", bg=PANEL_BG)
+    qr_lbl.pack()
+
+    def show_qr(data):
+        if about_window is not win:
+            return          # window was closed or rebuilt meanwhile
+        try:
+            from PIL import ImageTk
+            qr_photo = ImageTk.PhotoImage(Image.open(io.BytesIO(data)))
+            qr_lbl.config(image=qr_photo, text="")
+            qr_lbl.image = qr_photo
+        except Exception:
+            qr_lbl.config(text="[QR Code Loading Error]", fg="red")
+
+    def fetch_qr():
+        global _qr_cache
+        try:
+            qr_url = ("https://api.qrserver.com/v1/create-qr-code/?size=90x90&data="
+                      + urllib.parse.quote(DONATE_URL))
+            with urllib.request.urlopen(qr_url, timeout=5) as response:
+                _qr_cache = response.read()
+        except Exception:
+            ui_call(lambda: about_window is win and
+                    qr_lbl.config(text="[QR Code Loading Error]", fg="red"))
+            return
+        ui_call(show_qr, _qr_cache)
+
+    if _qr_cache:
+        show_qr(_qr_cache)
+    else:
+        threading.Thread(target=fetch_qr, daemon=True).start()
 
     def on_close():
         global about_window
@@ -857,7 +898,10 @@ class ThinSlider(tk.Canvas):
         return self._value
 
     def set(self, val, update_command=True):
-        self._value = max(self.from_, min(self.to, int(val)))
+        val = max(self.from_, min(self.to, int(val)))
+        if val == self._value:
+            return          # same value: no redraw, no system call, no save
+        self._value = val
         self.draw()
         if update_command and self.command:
             self.command(self._value)
@@ -1012,17 +1056,7 @@ def _show_popup_ui():
         if h <= 1:
             h = 30
 
-        radius = 6
-        btn_canvas.create_arc(0, 0, radius * 2, radius * 2, start=90, extent=90,
-                              fill=bg_col, outline="")
-        btn_canvas.create_arc(w - radius * 2, 0, w, radius * 2, start=0, extent=90,
-                              fill=bg_col, outline="")
-        btn_canvas.create_arc(0, h - radius * 2, radius * 2, h, start=180, extent=90,
-                              fill=bg_col, outline="")
-        btn_canvas.create_arc(w - radius * 2, h - radius * 2, w, h, start=270, extent=90,
-                              fill=bg_col, outline="")
-        btn_canvas.create_rectangle(radius, 0, w - radius, h, fill=bg_col, outline="")
-        btn_canvas.create_rectangle(0, radius, w, h - radius, fill=bg_col, outline="")
+        draw_round_rect(btn_canvas, w, h, bg_col)
 
         label = t("mode_default") if preset_active else t("mode_user")
         text_id = btn_canvas.create_text(w / 2 + 12, h / 2, text=label,
@@ -1097,9 +1131,8 @@ def quit_app(icon, item):
         icon.visible = False          # tray icon disappears immediately
     except Exception:
         pass
-    for tm in (_save_timer, _reapply_timer):
-        if tm:
-            tm.cancel()
+    if _reapply_timer:
+        _reapply_timer.cancel()
     brightness_queue.put(None)
     brightness_thread.join(1.0)
 
@@ -1139,6 +1172,7 @@ tray_icon_ref = pystray.Icon(
 )
 
 tray_icon_ref.default_action = show_popup
+update_tray_icon()          # localized tooltip from the very start
 # apply the stored state right away, then keep it alive across sleep/display changes
 enqueue_brightness(current_brightness, force=True)
 request_gamma_update(current_night_light, effective_contrast())
