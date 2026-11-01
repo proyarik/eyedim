@@ -10,6 +10,7 @@ Lightweight Windows utility to control display **brightness**, **night light** a
 - Night light (warm color temperature)
 - Contrast adjustment via gamma ramp
 - System tray icon showing current brightness
+- Change brightness by scrolling the mouse wheel over the tray icon (5% per notch)
 - "User" and "Default" preset modes
 - Display panel test from the tray menu (on all monitors at once): full-screen colours (black, white, red, green, blue, gray), three grids from coarse to very fine and a test card for checking dead pixels, backlight bleed and geometry
 - Autostart with Windows
@@ -24,7 +25,7 @@ Lightweight Windows utility to control display **brightness**, **night light** a
 
 [![Download Eyedim.exe](https://img.shields.io/badge/Download-Eyedim.exe-brightgreen?style=for-the-badge&logo=windows)](https://github.com/proyarik/eyedim/releases/latest)
 
-Latest version: **v2.0.9**
+Latest version: **v2.0.10**
 
 ## Installation
 
@@ -42,7 +43,7 @@ python Eyedim.pyw
 
 (or `pythonw Eyedim.pyw` to run without a console window)
 
-The app starts minimized in the system tray. Left-click the tray icon to open the settings popup.
+The app starts minimized in the system tray. Left-click the tray icon to open the settings popup, or hover over it and scroll the mouse wheel to change the brightness.
 
 ## Building a standalone .exe
 

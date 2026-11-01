@@ -22,7 +22,7 @@ from array import array
 
 # --- SYSTEM CONSTANTS ---
 DWMWA_WINDOW_CORNER_PREFERENCE = 33
-APP_VERSION = "v2.0.9"
+APP_VERSION = "v2.0.10"
 DONATE_URL = "https://your-donation-link.com"
 
 # --- DEFAULTS / LOOK (kept in sync with the web page demo) ---
@@ -1635,6 +1635,7 @@ def quit_app(icon, item):
         pass
     if _reapply_timer:
         _reapply_timer.cancel()
+    stop_wheel_control()
     brightness_queue.put(None)
     brightness_thread.join(1.0)
 
@@ -1658,6 +1659,204 @@ def quit_app(icon, item):
 
     ui_call(shutdown)
 
+# --- MOUSE WHEEL OVER THE TRAY ICON ---
+# Windows never sends wheel messages to tray icons, so we catch them with a
+# low-level mouse hook. The hook is installed only while the cursor is over
+# our icon (the icon reports WM_MOUSEMOVE) and is removed as soon as it leaves,
+# so the rest of the time nothing runs and other programs keep their wheel.
+WHEEL_STEP = 5                      # % per wheel notch
+WHEEL_DELTA = 120
+WHEEL_POLL_MS = 150                 # how often we check that the cursor is still there
+WM_MOUSEMOVE = 0x0200
+WM_MOUSEWHEEL = 0x020A
+WM_TIMER = 0x0113
+WM_QUIT = 0x0012
+WM_APP_WHEEL_ARM = 0x8000 + 21
+WM_APP_WHEEL_STEP = 0x8000 + 22
+WH_MOUSE_LL = 14
+HC_ACTION = 0
+
+class _MSLLHOOKSTRUCT(ctypes.Structure):
+    _fields_ = [("pt", wintypes.POINT), ("mouseData", wintypes.DWORD),
+                ("flags", wintypes.DWORD), ("time", wintypes.DWORD),
+                ("dwExtraInfo", ctypes.c_size_t)]
+
+class _NOTIFYICONIDENTIFIER(ctypes.Structure):
+    _fields_ = [("cbSize", wintypes.DWORD), ("hWnd", wintypes.HWND),
+                ("uID", wintypes.UINT), ("guidItem", GUID)]
+
+_LowLevelMouseProc = ctypes.WINFUNCTYPE(wintypes.LPARAM, ctypes.c_int,
+                                        wintypes.WPARAM, wintypes.LPARAM)
+_wheel_tid = None
+_wheel_armed = False
+
+def _wheel_apply(steps):
+    if _shutting_down.is_set() or steps == 0:
+        return
+    cur = current_brightness
+    # snap to the step grid, so 83 goes to 85 / 80 and then in whole steps
+    if steps > 0:
+        val = (cur // WHEEL_STEP + steps) * WHEEL_STEP
+    else:
+        val = (-(-cur // WHEEL_STEP) + steps) * WHEEL_STEP
+    val = max(0, min(100, val))
+    if val != cur:
+        set_brightness(val)         # same smooth path as the slider
+
+def _wheel_thread_main(ready):
+    global _wheel_tid, _wheel_armed
+    user32 = ctypes.windll.user32
+    user32.SetWindowsHookExW.restype = ctypes.c_void_p
+    user32.SetWindowsHookExW.argtypes = [ctypes.c_int, _LowLevelMouseProc,
+                                         wintypes.HINSTANCE, wintypes.DWORD]
+    user32.CallNextHookEx.restype = wintypes.LPARAM
+    user32.CallNextHookEx.argtypes = [ctypes.c_void_p, ctypes.c_int,
+                                      wintypes.WPARAM, wintypes.LPARAM]
+    user32.UnhookWindowsHookEx.argtypes = [ctypes.c_void_p]
+    user32.PostThreadMessageW.argtypes = [wintypes.DWORD, wintypes.UINT,
+                                          wintypes.WPARAM, wintypes.LPARAM]
+    user32.SetTimer.restype = ctypes.c_size_t
+    user32.SetTimer.argtypes = [wintypes.HWND, ctypes.c_size_t, wintypes.UINT, ctypes.c_void_p]
+    user32.KillTimer.argtypes = [wintypes.HWND, ctypes.c_size_t]
+    kernel32 = ctypes.windll.kernel32
+    kernel32.GetModuleHandleW.restype = wintypes.HMODULE
+    shell32 = ctypes.windll.shell32
+    shell32.Shell_NotifyIconGetRect.argtypes = [ctypes.POINTER(_NOTIFYICONIDENTIFIER),
+                                                ctypes.POINTER(wintypes.RECT)]
+    # physical pixels everywhere: the hook, the cursor and the icon rect
+    try:
+        user32.SetThreadDpiAwarenessContext.restype = ctypes.c_void_p
+        user32.SetThreadDpiAwarenessContext.argtypes = [ctypes.c_void_p]
+        user32.SetThreadDpiAwarenessContext(
+            ctypes.c_void_p(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2))
+    except Exception:
+        pass
+
+    tid = kernel32.GetCurrentThreadId()
+    msg = wintypes.MSG()
+    user32.PeekMessageW(ctypes.byref(msg), None, 0, 0, 0)   # create the queue
+    _wheel_tid = tid
+    ready.set()
+
+    hook = None
+    timer = 0
+    rect = wintypes.RECT()
+    acc = 0                         # sub-notch delta from smooth wheels / touchpads
+
+    def icon_rect():
+        icon = tray_icon_ref
+        hwnd = getattr(icon, "_hwnd", None)
+        if not hwnd:
+            return False
+        # pystray registers the icon with uID 0; try id(icon) too just in case
+        for uid in (0, id(icon) & 0xFFFFFFFF):
+            nid = _NOTIFYICONIDENTIFIER(cbSize=ctypes.sizeof(_NOTIFYICONIDENTIFIER),
+                                        hWnd=hwnd, uID=uid)
+            r = wintypes.RECT()
+            if shell32.Shell_NotifyIconGetRect(ctypes.byref(nid), ctypes.byref(r)) == 0:
+                rect.left, rect.top, rect.right, rect.bottom = r.left, r.top, r.right, r.bottom
+                return True
+        return False
+
+    def inside(x, y):
+        return rect.left <= x < rect.right and rect.top <= y < rect.bottom
+
+    def on_wheel(l_param):
+        nonlocal acc
+        info = ctypes.cast(l_param, ctypes.POINTER(_MSLLHOOKSTRUCT)).contents
+        if not inside(info.pt.x, info.pt.y):
+            return False
+        acc += ctypes.c_short((info.mouseData >> 16) & 0xFFFF).value
+        steps = int(acc / WHEEL_DELTA)
+        if steps:
+            acc -= steps * WHEEL_DELTA
+            # do the work outside the hook so the mouse never stutters
+            user32.PostThreadMessageW(tid, WM_APP_WHEEL_STEP, steps & 0xFFFFFFFF, 0)
+        return True
+
+    def hook_proc(n_code, w_param, l_param):
+        try:
+            if n_code == HC_ACTION and w_param == WM_MOUSEWHEEL and on_wheel(l_param):
+                return 1            # swallow: the taskbar should not scroll
+        except Exception:
+            pass
+        return user32.CallNextHookEx(None, n_code, w_param, l_param)
+
+    proc = _LowLevelMouseProc(hook_proc)    # keep a reference while hooked
+
+    def disarm():
+        global _wheel_armed
+        nonlocal hook, timer, acc
+        if timer:
+            user32.KillTimer(None, timer)
+            timer = 0
+        if hook:
+            user32.UnhookWindowsHookEx(hook)
+            hook = None
+        acc = 0
+        _wheel_armed = False
+
+    def cursor_inside():
+        pt = wintypes.POINT()
+        return bool(user32.GetCursorPos(ctypes.byref(pt))) and inside(pt.x, pt.y)
+
+    try:
+        while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
+            if msg.message == WM_APP_WHEEL_ARM:
+                if _shutting_down.is_set():
+                    continue
+                if not icon_rect():
+                    # no rect from the shell: a small box around the cursor
+                    pt = wintypes.POINT()
+                    user32.GetCursorPos(ctypes.byref(pt))
+                    rect.left, rect.top = pt.x - 16, pt.y - 16
+                    rect.right, rect.bottom = pt.x + 16, pt.y + 16
+                if hook is None:
+                    hook = user32.SetWindowsHookExW(WH_MOUSE_LL, proc,
+                                                    kernel32.GetModuleHandleW(None), 0)
+                    if not hook:
+                        _wheel_armed = False
+                        continue
+                if not timer:
+                    timer = user32.SetTimer(None, 0, WHEEL_POLL_MS, None)
+                _wheel_armed = True
+            elif msg.message == WM_TIMER:
+                if hook is not None and (_shutting_down.is_set() or not cursor_inside()):
+                    disarm()
+            elif msg.message == WM_APP_WHEEL_STEP:
+                steps = ctypes.c_int(msg.wParam & 0xFFFFFFFF).value
+                ui_call(_wheel_apply, steps)
+            else:
+                user32.TranslateMessage(ctypes.byref(msg))
+                user32.DispatchMessageW(ctypes.byref(msg))
+    finally:
+        disarm()
+
+def start_wheel_control(icon):
+    """Route wheel scrolls over the tray icon to the brightness."""
+    ready = threading.Event()
+    threading.Thread(target=_wheel_thread_main, args=(ready,), daemon=True).start()
+    ready.wait(2.0)
+    handlers = getattr(icon, "_message_handlers", None)
+    on_notify = getattr(icon, "_on_notify", None)
+    if not isinstance(handlers, dict) or on_notify is None:
+        return                      # unknown pystray internals: skip the feature
+    for code, fn in list(handlers.items()):
+        if fn == on_notify:
+            def notify(wparam, lparam, _orig=fn):
+                if lparam == WM_MOUSEMOVE and not _wheel_armed and _wheel_tid:
+                    ctypes.windll.user32.PostThreadMessageW(_wheel_tid, WM_APP_WHEEL_ARM, 0, 0)
+                return _orig(wparam, lparam)
+            handlers[code] = notify
+            break
+
+def stop_wheel_control():
+    if _wheel_tid:
+        try:
+            ctypes.windll.user32.PostThreadMessageW(_wheel_tid, WM_QUIT, 0, 0)
+        except Exception:
+            pass
+
 # --- TRAY ICON SETUP ---
 tray_icon_ref = pystray.Icon(
     "Eyedim",
@@ -1676,6 +1875,7 @@ tray_icon_ref = pystray.Icon(
 )
 
 tray_icon_ref.default_action = show_popup
+start_wheel_control(tray_icon_ref)
 update_tray_icon()          # localized tooltip from the very start
 # apply the stored state right away, then keep it alive across sleep/display changes
 enqueue_brightness(current_brightness, force=True)
