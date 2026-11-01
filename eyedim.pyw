@@ -47,6 +47,7 @@ TRANSLATIONS = {
     "en": {
         "menu_settings": "Open Settings",
         "menu_about": "About Eyedim",
+        "menu_panel_test": "Test Display Panel",
         "menu_autostart": "Run at Windows Startup",
         "menu_lang": "Language: English",
         "menu_exit": "Exit",
@@ -59,11 +60,15 @@ TRANSLATIONS = {
         "about_license": "Distributed under GNU GPLv3 terms.\nProvided AS IS, without any warranties.",
         "about_support": "Support the project:",
         "tooltip_format": "Eyedim — Brightness: {}% | Night Light: {}% | Contrast: {}%",
-        "tooltip_format_short": "Eyedim — Brightness: {}% | Night Light: {}%"
+        "tooltip_format_short": "Eyedim — Brightness: {}% | Night Light: {}%",
+        "test_hint": "{}/{} · {} · Click or Space: next · Right-click or ←: back · Esc: exit",
+        "test_screens": ["Black", "White", "Red", "Green", "Blue", "Gray",
+                         "Grid", "Fine grid", "Very fine grid", "Test card"]
     },
     "ru": {
         "menu_settings": "Открыть настройки",
         "menu_about": "О программе Eyedim",
+        "menu_panel_test": "Проверка матрицы",
         "menu_autostart": "Запускать при старте Windows",
         "menu_lang": "Язык: Русский",
         "menu_exit": "Выход",
@@ -76,7 +81,10 @@ TRANSLATIONS = {
         "about_license": "Распространяется на условиях GNU GPLv3.\nПоставляется БЕЗ КАКИХ-ЛИБО ГАРАНТИЙ.",
         "about_support": "Поддержать проект:",
         "tooltip_format": "Eyedim — Яркость: {}% | Ночной свет: {}% | Контраст: {}%",
-        "tooltip_format_short": "Eyedim — Яркость: {}% | Ночной свет: {}%"
+        "tooltip_format_short": "Eyedim — Яркость: {}% | Ночной свет: {}%",
+        "test_hint": "{}/{} · {} · Щелчок или пробел — дальше · Правая кнопка или ← — назад · Esc — выход",
+        "test_screens": ["Чёрный", "Белый", "Красный", "Зелёный", "Синий", "Серый",
+                         "Сетка", "Мелкая сетка", "Очень мелкая сетка", "Настроечная таблица"]
     }
 }
 
@@ -200,6 +208,7 @@ def schedule_save():
 
 popup_window = None
 about_window = None
+panel_test_windows = []                # one full-screen window per monitor
 tray_icon_ref = None
 brightness_slider_ref = None
 night_slider_ref = None
@@ -419,6 +428,13 @@ def request_gamma_update(nl=None, c=None, instant=False):
         if instant:
             _gamma["force"] = True
     gamma_dirty.set()
+
+def gamma_target():
+    """Night light / contrast that should be on screen right now. The display
+    panel test needs true colours, so it keeps the ramp neutral while open."""
+    if panel_test_windows:
+        return 0, 50
+    return current_night_light, effective_contrast()
 
 def read_pending_gamma():
     with gamma_lock:
@@ -739,7 +755,7 @@ REAPPLY_DELAYS = (1.5, 5.0)   # second pass catches late resets by driver/monito
 def reapply_all():
     if _shutting_down.is_set():
         return
-    request_gamma_update(current_night_light, effective_contrast(), instant=True)
+    request_gamma_update(*gamma_target(), instant=True)
     enqueue_brightness(current_brightness, force=True)
 
 def schedule_reapply(delays=REAPPLY_DELAYS):
@@ -1374,6 +1390,240 @@ def _show_popup_ui():
     popup_window.bind("<FocusOut>", lambda e: close_popup())
     popup_window.focus_force()
 
+# --- DISPLAY PANEL TEST ---
+# Full-screen solid colours and test patterns for checking a monitor for dead
+# or stuck pixels, backlight bleed and geometry. Opens on every monitor at once
+# (all show the same screen); night light and contrast stay neutral meanwhile.
+PANEL_TEST_SOLIDS = [(0, 0, 0), (255, 255, 255), (255, 0, 0),
+                     (0, 255, 0), (0, 0, 255), (128, 128, 128)]
+PANEL_TEST_HINT_MS = 2500
+DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = -4
+
+def _grid_lines(draw, w, h, cell, color):
+    """1 px lines every `cell` pixels, aligned so that lines cross the centre."""
+    cx, cy = w // 2, h // 2
+    for x in range(cx % cell, w, cell):
+        draw.line([(x, 0), (x, h - 1)], fill=color)
+    for y in range(cy % cell, h, cell):
+        draw.line([(0, y), (w - 1, y)], fill=color)
+
+def render_grid(w, h, divisor=1):
+    """Grid of ~12 cells across the short side, `divisor` times finer."""
+    img = Image.new("RGB", (w, h), (0, 0, 0))
+    d = ImageDraw.Draw(img)
+    coarse = max(8, round(min(w, h) / 12))
+    _grid_lines(d, w, h, max(4, coarse // divisor), (255, 255, 255))
+    edge = max(2, round(w / 960))
+    d.rectangle([0, 0, w - 1, h - 1], outline=(255, 255, 255), width=edge)
+    cx, cy = w // 2, h // 2
+    d.line([(cx, 0), (cx, h - 1)], fill=(255, 255, 255), width=edge)
+    d.line([(0, cy), (w - 1, cy)], fill=(255, 255, 255), width=edge)
+    return img
+
+def render_test_card(w, h):
+    img = Image.new("RGB", (w, h), (60, 60, 60))
+    d = ImageDraw.Draw(img)
+    _grid_lines(d, w, h, max(8, round(min(w, h) / 10)), (232, 232, 232))
+    cell = max(8, round(min(w, h) / 10))
+    line_w = max(1, cell // 20)
+    cr = round(cell * 0.9)
+    for x, y in ((cr * 1.3, cr * 1.3), (w - cr * 1.3, cr * 1.3),
+                 (cr * 1.3, h - cr * 1.3), (w - cr * 1.3, h - cr * 1.3)):
+        d.ellipse([x - cr, y - cr, x + cr, y + cr], outline=(255, 255, 255), width=line_w)
+
+    # everything inside the big circle is drawn on its own square, then masked
+    R = round(min(w, h) * 0.44)
+    S = 2 * R
+    inner = Image.new("RGB", (S, S), (26, 26, 26))
+    di = ImageDraw.Draw(inner)
+    band = S / 6
+
+    def box(x0, y0, x1, y1, fill):
+        di.rectangle([round(x0), round(y0), round(x1) - 1, round(y1) - 1], fill=fill)
+
+    bars = [(255, 255, 255), (255, 255, 0), (0, 255, 255), (0, 255, 0),
+            (255, 0, 255), (255, 0, 0), (0, 0, 255), (0, 0, 0)]
+    for i, col in enumerate(bars):                       # colour bars
+        box(i * S / 8, 0, (i + 1) * S / 8, band * 1.6, col)
+    for i in range(11):                                  # grey steps 0..100 %
+        v = round(i * 25.5)
+        box(i * S / 11, band * 1.6, (i + 1) * S / 11, band * 2.5, (v, v, v))
+    gy0, gy1 = round(band * 2.5), round(band * 3.2)      # black-to-white ramp
+    for x in range(S):
+        v = round(x * 255 / max(1, S - 1))
+        di.line([(x, gy0), (x, gy1 - 1)], fill=(v, v, v))
+    fy0, fy1 = band * 3.2, band * 4.2                    # line-pair wedges
+    for gi, p in enumerate((8, 5, 3, 2, 1)):
+        gx = round(S * 0.08 + gi * S * 0.17)
+        gw = round(S * 0.15)
+        box(gx, fy0, gx + gw, fy1, (0, 0, 0))
+        for x in range(0, gw, p * 2):
+            box(gx + x, fy0, gx + min(x + p, gw), fy1, (255, 255, 255))
+    for i, col in enumerate([(204, 0, 0), (0, 170, 0), (0, 0, 204)]):
+        box(i * S / 3, band * 4.2, (i + 1) * S / 3, band * 5, col)
+    box(0, band * 5, S, S, (255, 255, 255))
+    font = _get_font(max(10, round(R * 0.11)))
+    tb = di.textbbox((0, 0), "EYEDIM", font=font)
+    di.text((R - (tb[2] - tb[0]) / 2 - tb[0], band * 5.5 - (tb[3] - tb[1]) / 2 - tb[1]),
+            "EYEDIM", fill=(0, 0, 0), font=font)
+
+    mask = Image.new("L", (S, S), 0)
+    ImageDraw.Draw(mask).ellipse([0, 0, S - 1, S - 1], fill=255)
+    cx, cy = w // 2, h // 2
+    img.paste(inner, (cx - R, cy - R), mask)
+    d.ellipse([cx - R, cy - R, cx + R, cy + R], outline=(255, 255, 255),
+              width=max(2, R // 80))
+    d.line([(cx - R * 0.12, cy + R * 0.5), (cx + R * 0.12, cy + R * 0.5)],
+           fill=(255, 255, 255), width=max(1, R // 150))
+    return img
+
+PANEL_TEST_PATTERNS = [lambda w, h: render_grid(w, h),
+                       lambda w, h: render_grid(w, h, 4),
+                       lambda w, h: render_grid(w, h, 8),
+                       render_test_card]
+
+def _monitor_rects():
+    """Rectangles of all monitors; the one under the mouse cursor goes first."""
+    rects = []
+    try:
+        cursor = win32api.GetCursorPos()
+        for _h, _dc, rect in win32api.EnumDisplayMonitors(None, None):
+            l, t_, r, b = rect
+            under = l <= cursor[0] < r and t_ <= cursor[1] < b
+            rects.insert(0, rect) if under else rects.append(rect)
+    except Exception:
+        pass
+    if not rects:
+        rects = [(0, 0, root_window.winfo_screenwidth(), root_window.winfo_screenheight())]
+    return rects
+
+def show_panel_test(icon=None, item=None):
+    ui_call(_toggle_panel_test)
+
+def _toggle_panel_test():
+    if panel_test_windows:
+        close_panel_test()
+    else:
+        _open_panel_test()
+
+def close_panel_test(restore_gamma=True):
+    global panel_test_windows
+    wins = panel_test_windows
+    if not wins:
+        return
+    panel_test_windows = []
+    for win in wins:
+        try:
+            win.destroy()
+        except Exception:
+            pass
+    if restore_gamma and not _shutting_down.is_set():
+        request_gamma_update(*gamma_target())
+
+def _open_panel_test():
+    global panel_test_windows
+    close_popup()
+    close_about()
+
+    # Create the windows per-monitor DPI aware, so that on a scaled display
+    # (125 %, 150 % ...) every pattern pixel is one physical pixel and Windows
+    # does not blur the picture. The rest of the app stays as it is.
+    user32 = ctypes.windll.user32
+    old_ctx = None
+    try:
+        user32.SetThreadDpiAwarenessContext.restype = ctypes.c_void_p
+        user32.SetThreadDpiAwarenessContext.argtypes = [ctypes.c_void_p]
+        old_ctx = user32.SetThreadDpiAwarenessContext(
+            ctypes.c_void_p(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2))
+    except Exception:
+        old_ctx = None
+    screens = []                                # (window, canvas, w, h) per monitor
+    try:
+        for left, top, right, bottom in _monitor_rects():
+            w, h = right - left, bottom - top
+            win = tk.Toplevel(root_window, bg="black")
+            win.overrideredirect(True)
+            win.attributes("-topmost", True)
+            win.geometry(f"{w}x{h}+{left}+{top}")
+            canvas = tk.Canvas(win, width=w, height=h, bg="black",
+                               highlightthickness=0, cursor="none")
+            canvas.pack(fill=tk.BOTH, expand=True)
+            screens.append((win, canvas, w, h))
+        root_window.update_idletasks()
+    finally:
+        if old_ctx:
+            try:
+                user32.SetThreadDpiAwarenessContext(ctypes.c_void_p(old_ctx))
+            except Exception:
+                pass
+
+    panel_test_windows = [s[0] for s in screens]
+    request_gamma_update(0, 50, instant=True)
+
+    total = len(PANEL_TEST_SOLIDS) + len(PANEL_TEST_PATTERNS)
+    state = {"i": 0, "hint_job": None}
+    photos = {}                                 # (pattern, w, h) -> PhotoImage
+
+    def hide_hint():
+        state["hint_job"] = None
+        for _win, canvas, _w, _h in screens:
+            canvas.delete("hint")
+
+    def draw(canvas, w, h, i):
+        canvas.delete("all")
+        if i < len(PANEL_TEST_SOLIDS):
+            canvas.config(bg="#%02x%02x%02x" % PANEL_TEST_SOLIDS[i])
+            return
+        key = (i, w, h)
+        if key not in photos:
+            from PIL import ImageTk
+            img = PANEL_TEST_PATTERNS[i - len(PANEL_TEST_SOLIDS)](w, h)
+            photos[key] = ImageTk.PhotoImage(img, master=canvas)
+        canvas.config(bg="black")
+        canvas.create_image(0, 0, image=photos[key], anchor="nw")
+
+    def draw_hint(canvas, w, h, text):
+        font_px = max(11, h // 70)
+        tid = canvas.create_text(w // 2, h - h // 16, text=text, fill="#eeeeee",
+                                 font=("Segoe UI", -font_px), tags="hint")
+        x0, y0, x1, y1 = canvas.bbox(tid)
+        pad = font_px // 2
+        bg = canvas.create_rectangle(x0 - pad * 2, y0 - pad, x1 + pad * 2, y1 + pad,
+                                     fill="#202020", outline="#3a3a3a", tags="hint")
+        canvas.tag_lower(bg, tid)
+
+    def show():
+        i = state["i"]
+        names = t("test_screens")
+        text = t("test_hint").format(i + 1, total, names[i] if i < len(names) else "")
+        for _win, canvas, w, h in screens:
+            draw(canvas, w, h, i)
+            draw_hint(canvas, w, h, text)
+        if state["hint_job"]:
+            root_window.after_cancel(state["hint_job"])
+        state["hint_job"] = root_window.after(PANEL_TEST_HINT_MS, hide_hint)
+
+    def step(delta):
+        if not panel_test_windows:
+            return
+        state["i"] = (state["i"] + delta) % total
+        show()
+
+    for win, _canvas, _w, _h in screens:
+        win.bind("<Button-1>", lambda e: step(1))
+        win.bind("<space>", lambda e: step(1))
+        win.bind("<Right>", lambda e: step(1))
+        win.bind("<Return>", lambda e: step(1))
+        win.bind("<Button-3>", lambda e: step(-1))
+        win.bind("<Left>", lambda e: step(-1))
+        win.bind("<BackSpace>", lambda e: step(-1))
+        win.bind("<Escape>", lambda e: close_panel_test())
+
+    show()
+    for win, _canvas, _w, _h in screens:
+        win.lift()
+    screens[0][0].focus_force()             # keyboard goes to the cursor's monitor
+
 # --- QUIT ---
 def quit_app(icon, item):
     global _exiting
@@ -1396,6 +1646,7 @@ def quit_app(icon, item):
     save_config(clean_exit=True)
 
     def shutdown():
+        close_panel_test(restore_gamma=False)
         close_popup()
         close_about()
         try:
@@ -1414,6 +1665,7 @@ tray_icon_ref = pystray.Icon(
     f"Eyedim {APP_VERSION} — Brightness: {current_brightness}%",
     pystray.Menu(
         pystray.MenuItem(lambda item: t("menu_settings"), show_popup, default=True),
+        pystray.MenuItem(lambda item: t("menu_panel_test"), show_panel_test),
         pystray.MenuItem(lambda item: t("menu_about"), show_about),
         pystray.MenuItem(lambda item: t("menu_autostart"), toggle_autostart,
                          checked=lambda item: is_autostart_enabled()),
