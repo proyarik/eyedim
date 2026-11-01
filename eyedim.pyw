@@ -318,7 +318,7 @@ def update_popup_labels_and_sliders():
         mode_btn_redraw_ref()
 
 # --- GAMMA RAMP ---
-@functools.lru_cache(maxsize=64)
+@functools.lru_cache(maxsize=128)   # fades revisit the same values
 def build_gamma_ramp(nl, c):
     """256 R + 256 G + 256 B 16-bit little-endian values (1536 bytes)."""
     nl_factor = nl / 100.0
@@ -368,84 +368,172 @@ def apply_gamma_direct(nl, c):
     except Exception:
         pass
 
-# --- GAMMA WORKER ---
+# --- GAMMA WORKER (smooth transitions) ---
+# Night light / contrast changes are faded in a single worker thread: every
+# new request retargets the running fade from the value currently on screen,
+# so fast slider moves never queue up or "jump back". Values are rounded to
+# whole units and identical frames are skipped, so a full 0 -> 100 fade costs
+# at most ~25 ramp writes, and an idle app costs nothing (the thread sleeps).
+GAMMA_FADE_FULL = 0.6               # seconds for a full 0 -> 100 change
+GAMMA_FRAME = 1.0 / 40              # ~40 fps while a fade is running
+GAMMA_INSTANT_DELTA = 2             # tiny steps (slider drag) apply at once
+_shutting_down = threading.Event()
+
 gamma_lock = threading.Lock()
 gamma_dirty = threading.Event()
-gamma_pending = {"nl": current_night_light, "c": effective_contrast()}
+_gamma = {
+    "from": (float(current_night_light), float(effective_contrast())),
+    "to": (float(current_night_light), float(effective_contrast())),
+    "t0": 0.0,
+    "dur": 0.0,
+    "force": True,                  # first frame is always written
+    "restore_due": None,            # re-send ramp after a brightness write
+    "restore_last": None,
+}
 
-def request_gamma_update(nl=None, c=None):
+def _gamma_value_at(now):
+    """Value on screen at moment `now` (call with gamma_lock held)."""
+    g = _gamma
+    if g["dur"] <= 0 or now >= g["t0"] + g["dur"]:
+        return g["to"]
+    p = (now - g["t0"]) / g["dur"]
+    p = p * p * (3 - 2 * p)         # smoothstep: soft start and soft finish
+    (a0, b0), (a1, b1) = g["from"], g["to"]
+    return a0 + (a1 - a0) * p, b0 + (b1 - b0) * p
+
+def request_gamma_update(nl=None, c=None, instant=False):
+    now = time.monotonic()
     with gamma_lock:
-        if nl is not None:
-            gamma_pending["nl"] = nl
-        if c is not None:
-            gamma_pending["c"] = c
+        cur = _gamma_value_at(now)
+        old = _gamma["to"]
+        new = (float(old[0] if nl is None else nl),
+               float(old[1] if c is None else c))
+        dist = max(abs(new[0] - cur[0]), abs(new[1] - cur[1]))
+        _gamma["from"] = cur
+        _gamma["to"] = new
+        _gamma["t0"] = now
+        if instant or dist <= GAMMA_INSTANT_DELTA:
+            _gamma["dur"] = 0.0
+        else:
+            _gamma["dur"] = GAMMA_FADE_FULL * min(1.0, dist / 100.0)
+        if instant:
+            _gamma["force"] = True
     gamma_dirty.set()
 
 def read_pending_gamma():
     with gamma_lock:
-        return gamma_pending["nl"], gamma_pending["c"]
+        return _gamma["to"]
+
+def schedule_gamma_restore(delay):
+    """Re-send the current ramp `delay` s from now (DDC writes may reset it).
+    Repeated calls keep the earliest pending restore and also guarantee one
+    after the latest call, so a long brightness fade is covered too."""
+    when = time.monotonic() + delay
+    with gamma_lock:
+        if _gamma["restore_due"] is None:
+            _gamma["restore_due"] = when
+        _gamma["restore_last"] = when
+    gamma_dirty.set()
 
 def gamma_worker():
+    last_sent = None
     while True:
-        gamma_dirty.wait()
+        now = time.monotonic()
+        with gamma_lock:
+            nl, c = _gamma_value_at(now)
+            fading = _gamma["dur"] > 0 and now < _gamma["t0"] + _gamma["dur"]
+            force = _gamma["force"]
+            _gamma["force"] = False
+            due = _gamma["restore_due"]
+            if due is not None and now >= due:
+                force = True
+                last = _gamma["restore_last"]
+                _gamma["restore_due"] = last if last > due else None
+                due = _gamma["restore_due"]
+
+        frame = (int(round(nl)), int(round(c)))
+        if not _shutting_down.is_set() and (force or frame != last_sent):
+            apply_gamma_direct(*frame)
+            last_sent = frame
+
+        # sleep until the next fade frame / pending restore, or forever if idle
+        timeout = GAMMA_FRAME if fading else None
+        if due is not None:
+            left = max(0.0, due - time.monotonic())
+            timeout = left if timeout is None else min(timeout, left)
+        gamma_dirty.wait(timeout)
         gamma_dirty.clear()
-        nl, c = read_pending_gamma()
-        apply_gamma_direct(nl, c)
 
 threading.Thread(target=gamma_worker, daemon=True).start()
 
-# --- BRIGHTNESS WORKER ---
+# --- BRIGHTNESS WORKER (smooth transitions) ---
+# Hardware brightness (DDC/CI or WMI) is slow and some monitors misbehave on
+# rapid writes, so large jumps are split into steps of BRIGHTNESS_FADE_STEP
+# (at most 10 writes for 0 -> 100) with a short pause between them. New targets arriving mid-fade
+# retarget it immediately; forced writes (startup, wake, retries) jump directly.
 brightness_queue = queue.Queue()
 BRIGHTNESS_STEP = 5
+BRIGHTNESS_FADE_STEP = 10           # max change per write while fading
+BRIGHTNESS_FADE_PAUSE = 0.05        # pause between fade writes
 GAMMA_RESTORE_DELAY = 0.12
 MAX_BRIGHTNESS_RETRIES = 3          # quick retries: 0.5 s, 1 s, 1.5 s
 desired_brightness = current_brightness
-_shutting_down = threading.Event()
 
 def brightness_worker():
     last_applied = -1
-    restore_timer = None
     fail_streak = 0
-
-    def restore_gamma_later():
-        time.sleep(GAMMA_RESTORE_DELAY)
-        nl, c = read_pending_gamma()
-        apply_gamma_direct(nl, c)
+    target = None
+    force = False
 
     while True:
-        item = brightness_queue.get()
-        if item is None:
-            return
-        val, force = item
-        while not brightness_queue.empty():
+        if target is None:
+            item = brightness_queue.get()
+            if item is None:
+                return
+            target, force = item
+        # coalesce everything queued so far: only the latest target matters
+        while True:
             try:
                 nxt = brightness_queue.get_nowait()
             except queue.Empty:
                 break
             if nxt is None:
                 return
-            val = nxt[0]
+            target = nxt[0]
             force = force or nxt[1]
         if _shutting_down.is_set():
+            target = None
             continue
-        if val == last_applied and not force:
+        if target == last_applied and not force:
+            target = None
             continue
+
+        if force or last_applied < 0:
+            val = target
+        else:
+            step = BRIGHTNESS_FADE_STEP
+            val = last_applied + max(-step, min(step, target - last_applied))
         try:
             sbc.set_brightness(val)
             last_applied = val
             fail_streak = 0
-            if restore_timer is not None:
-                restore_timer.cancel()
-            restore_timer = threading.Timer(GAMMA_RESTORE_DELAY, restore_gamma_later)
-            restore_timer.daemon = True
-            restore_timer.start()
+            force = False
+            schedule_gamma_restore(GAMMA_RESTORE_DELAY)
         except Exception:
+            target = None
+            force = False
             if fail_streak < MAX_BRIGHTNESS_RETRIES:
                 fail_streak += 1
                 tm = threading.Timer(0.5 * fail_streak,
                                      lambda: enqueue_brightness(desired_brightness, force=True))
                 tm.daemon = True
                 tm.start()
+            continue
+
+        if val == target:
+            target = None
+        elif _shutting_down.wait(BRIGHTNESS_FADE_PAUSE):
+            target = None
 
 brightness_thread = threading.Thread(target=brightness_worker, daemon=True)
 brightness_thread.start()
@@ -487,7 +575,7 @@ REAPPLY_DELAYS = (1.5, 5.0)   # second pass catches late resets by driver/monito
 def reapply_all():
     if _shutting_down.is_set():
         return
-    request_gamma_update(current_night_light, effective_contrast())
+    request_gamma_update(current_night_light, effective_contrast(), instant=True)
     enqueue_brightness(current_brightness, force=True)
 
 def schedule_reapply(delays=REAPPLY_DELAYS):
@@ -1137,7 +1225,7 @@ def quit_app(icon, item):
     brightness_thread.join(1.0)
 
     # back to the original state: neutral gamma + brightness from before launch
-    request_gamma_update(0, 50)
+    request_gamma_update(0, 50, instant=True)
     apply_gamma_direct(0, 50)
     restore_original_brightness()
     apply_gamma_direct(0, 50)         # DDC writes may reset the ramp again
@@ -1175,7 +1263,7 @@ tray_icon_ref.default_action = show_popup
 update_tray_icon()          # localized tooltip from the very start
 # apply the stored state right away, then keep it alive across sleep/display changes
 enqueue_brightness(current_brightness, force=True)
-request_gamma_update(current_night_light, effective_contrast())
+request_gamma_update(current_night_light, effective_contrast(), instant=True)
 start_display_watcher()
 save_config()
 
