@@ -64,6 +64,26 @@ input[type=range]::-moz-range-thumb{width:12px;height:12px;border:0;border-radiu
 .cur.burst .ring{animation:rip .6s ease-out}
 @keyframes rip{0%{opacity:1;transform:scale(.3)}100%{opacity:0;transform:scale(1.6)}}
 @media (prefers-reduced-motion:reduce){.cur{display:none}}
+.scr #tcv{position:absolute;inset:0;width:100%;height:100%;display:block;cursor:pointer;z-index:2}
+.scr:fullscreen{border-radius:0;aspect-ratio:auto}.scr:fullscreen #tcv{cursor:none}
+.thint{position:absolute;left:50%;bottom:6%;z-index:3;transform:translateX(-50%);max-width:92%;background:rgba(20,20,20,.78);color:#eee;border:1px solid rgba(255,255,255,.14);border-radius:999px;padding:4px 12px;font:500 11px/1.4 "Segoe UI",system-ui,sans-serif;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;pointer-events:none;transition:opacity .6s}
+.scr:fullscreen .thint{font-size:15px;padding:7px 18px}
+.thint.off{opacity:0}
+.under{display:flex;flex-wrap:wrap;gap:16px;align-items:flex-start;justify-content:space-between;margin-top:20px}
+.under .pop{margin:0;flex:1 1 250px;max-width:310px;width:auto}
+.tmenu{flex:0 0 172px;font:13px/1.3 "Segoe UI",system-ui,sans-serif;background:#f9f9fb;color:#222;border-radius:8px;padding:4px;box-shadow:0 14px 36px rgba(0,0,0,.45)}
+.tcap{font-size:11px;color:#777;padding:4px 10px 2px}
+.tmenu .mi{display:block;width:100%;text-align:left;padding:6px 10px;border-radius:4px;border:0;background:none;color:#555;font:inherit}
+.tmenu .mi.b{font-weight:600;color:#222}
+.tmenu button.mi{color:#222;cursor:pointer;background:#fbefd9;box-shadow:inset 0 0 0 1.5px #d98a12}
+.tmenu button.mi:hover{background:#f6dfb8}
+.tmenu .sep{height:1px;background:#ddd;margin:4px 8px}
+.tbar{display:flex;flex-wrap:wrap;gap:8px;margin:14px 0 0;align-items:center}
+.tbar button{background:none;border:1px solid var(--line);color:var(--text);border-radius:999px;padding:6px 14px;font:inherit;font-size:14px;cursor:pointer}
+.tbar button:hover{border-color:var(--amber)}
+.tbar #tfs{background:var(--amber);border-color:var(--amber);color:var(--ink);font-weight:700}
+.tbar span{color:var(--mute);font-size:13px;font-variant-numeric:tabular-nums;margin-left:auto}
+@media (prefers-reduced-motion:reduce){.thint{transition:none}}
 .dnote{font-size:13px;color:var(--mute);margin:14px 0 0}
 .dnote button{background:none;border:0;color:var(--amber);cursor:pointer;font:inherit;text-decoration:underline;padding:0 0 0 6px}
 /* sections */
@@ -113,13 +133,29 @@ footer a{color:var(--mute)}
         <div class="code">const eyes = tired ? dim() : ok();</div>
       </div>
       <div class="warm" id="warm"></div>
+      <canvas id="tcv" hidden></canvas><div class="thint" id="thint" hidden></div>
     </div></div>
     <div class="neck"></div><div class="base"></div>
+    <div class="under">
+    <div class="tmenu" role="group" aria-labelledby="tcap">
+      <div class="tcap" id="tcap" data-i="mcap"></div>
+      <div class="mi b" data-i="m1"></div>
+      <button type="button" class="mi" id="tmi" data-i="m2"></button>
+      <div class="mi" data-i="m3"></div>
+      <div class="sep"></div>
+      <div class="mi" data-i="m4"></div>
+    </div>
     <div class="pop">
       <div class="sl"><svg viewBox="0 0 24 24" fill="#f2a93b" aria-hidden="true"><circle cx="12" cy="12" r="5"/><g stroke="#f2a93b" stroke-width="2" stroke-linecap="round"><path d="M12 1v3M12 20v3M1 12h3M20 12h3M4 4l2 2M18 18l2 2M4 20l2-2M18 6l2-2"/></g></svg><input type="range" id="b" min="0" max="100" aria-label="Brightness"><output id="bo"></output></div>
       <div class="sl"><svg viewBox="0 0 24 24" fill="#2f5fd0" aria-hidden="true"><path d="M20 15A9 9 0 0 1 9 4a9 9 0 1 0 11 11z"/></svg><input type="range" id="n" min="0" max="100" aria-label="Night light"><output id="no"></output></div>
       <div class="sl" id="crow" style="display:none"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" fill="none" stroke="#444" stroke-width="2"/><path d="M12 3a9 9 0 0 1 0 18z" fill="#444"/></svg><input type="range" id="c" min="0" max="100" aria-label="Contrast"><output id="co"></output></div>
       <div class="prof"><button type="button" id="mode"><svg viewBox="0 0 24 24" fill="none" stroke="#2f5fd0" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M5 19l2-2M17 7l2-2"/></svg><span id="ml"></span></button><button type="button" id="ct" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true" style="width:18px;height:18px"><circle cx="12" cy="12" r="9" fill="none" stroke="#444" stroke-width="2"/><path d="M12 3a9 9 0 0 1 0 18z" fill="#444"/></svg></button></div>
+    </div>
+    </div>
+    <div class="tbar" id="tbar" hidden>
+      <button type="button" id="tprev" aria-label="Back">←</button><button type="button" id="tnext" aria-label="Next">→</button>
+      <button type="button" id="tfs" data-i="tfs"></button><button type="button" id="tx" data-i="tx"></button>
+      <span id="tnum"></span>
     </div>
     <p class="dnote"><span data-i="hint"></span> <span data-i="approx"></span></p>
   </div>
@@ -159,7 +195,7 @@ var T={
 ru:{h1:"Яркость, ночной свет и контраст: настройка за секунду",lead:"Свой и стандартный режимы переключаются одним щелчком из трея. Чтобы глаза не уставали.",dl:"Скачать бесплатно",size:"14,8 МБ",
 c1:"Без рекламы",c2:"Без регистрации",c3:"Не собирает данные",c4:"Работает без интернета",c5:"Установка не нужна",c6:"Открытый код",
 warn:"Файл не подписан, поэтому Windows или антивирус могут показать предупреждение. Нажмите «Подробнее» и «Выполнить в любом случае». Код открыт, его можно проверить и собрать самому.",
-mu:"Режим: Пользователь",md:"Режим: По умолчанию",approx:"Примерный эффект: в браузере он лишь похож на работу программы.",hint:"Демо играет само. Двигайте ползунки, чтобы попробовать.",
+mu:"Режим: Пользователь",md:"Режим: По умолчанию",approx:"Примерный эффект: в браузере он лишь похож на работу программы.",hint:"Демо играет само. Двигайте ползунки или нажмите «Проверка матрицы» в меню, чтобы попробовать.",
 ph:"К вечеру глаза горят?",pp:"Экран светит одинаково ярко в полдень и в одиннадцать вечера. Eyedim за секунду подстроит яркость, тёплый свет и контраст под время суток, и лезть в настройки монитора не нужно.",
 f1h:"Два ползунка и контраст по желанию",f1p:"Яркость и ночной свет всегда под рукой, а контраст включается кнопкой в окошке.",ct1:"Показать контраст",ct2:"Скрыть контраст",
 f2h:"Два режима",f2p:"Свой и стандартный. Настройте один раз и переключайтесь одним щелчком.",
@@ -169,11 +205,14 @@ lh:"Честно об ограничениях",
 l1:"Яркость внешних мониторов меняется по DDC/CI. На некоторых моделях эту функцию нужно включить в меню самого монитора. На ноутбуках работает через WMI.",
 l2:"Ночной свет и контраст программные: они меняют гамму через видеокарту и работают на любом мониторе, но не расширяют его возможности.",
 l3:"В режиме HDR и рядом с другими программами, меняющими гамму (например, f.lux), эффект может не примениться.",
+mcap:"Меню значка в трее",m1:"Открыть настройки",m2:"Проверка матрицы",m3:"О программе Eyedim",m4:"Выход",
+tfs:"На весь экран",tx:"Выйти из теста",th:"Щелчок — дальше · правая кнопка — назад · Esc — выход",
+tn:["Чёрный","Белый","Красный","Зелёный","Синий","Серый","Сетка","Мелкая сетка","Очень мелкая сетка","Настроечная таблица"],
 fh:"Eyedim бесплатна",fp:"Windows 10/11, 14,8 МБ, без установки. Исходный код открыт.",gh:"Код на GitHub"},
 en:{h1:"Brightness, night light and contrast: set in a second",lead:"Your own and the default mode switch with one click from the tray. Easier on your eyes.",dl:"Download free",size:"14.8 MB",
 c1:"No ads",c2:"No sign-up",c3:"No data collection",c4:"Works offline",c5:"No installation",c6:"Open source",
 warn:"The file is not code-signed, so Windows or your antivirus may show a warning. Click “More info” and “Run anyway”. The code is open: you can inspect it and build it yourself.",
-mu:"Mode: User",md:"Mode: Default",approx:"Approximate effect: in the browser it only resembles what the app does.",hint:"The demo plays on its own. Move the sliders to try it.",
+mu:"Mode: User",md:"Mode: Default",approx:"Approximate effect: in the browser it only resembles what the app does.",hint:"The demo plays on its own. Move the sliders or click “Test Display Panel” in the menu to try it.",
 ph:"Eyes burning by evening?",pp:"Your screen is just as bright at noon as at eleven at night. Eyedim adjusts brightness, warm light and contrast to the time of day in a second, with no digging through monitor menus.",
 f1h:"Two sliders, contrast on demand",f1p:"Brightness and night light are always at hand, and contrast is one button away in the window.",ct1:"Show contrast",ct2:"Hide contrast",
 f2h:"Two modes",f2p:"Your own and the default. Set up once, switch with one click.",
@@ -183,6 +222,9 @@ lh:"Honest limitations",
 l1:"External monitor brightness is set over DDC/CI. Some models need it enabled in the monitor's own menu. On laptops it works through WMI.",
 l2:"Night light and contrast are software-based: they change gamma through the graphics card and work on any monitor, but they don't extend its capabilities.",
 l3:"In HDR mode and alongside other tools that change gamma (such as f.lux), the effect may not apply.",
+mcap:"Tray icon menu",m1:"Open Settings",m2:"Test Display Panel",m3:"About Eyedim",m4:"Exit",
+tfs:"Full screen",tx:"Exit test",th:"Click: next · right-click: back · Esc: exit",
+tn:["Black","White","Red","Green","Blue","Gray","Grid","Fine grid","Very fine grid","Test card"],
 fh:"Eyedim is free",fp:"Windows 10/11, 14.8 MB, no installation. Source code is open.",gh:"Code on GitHub"}};
 var P={def:[80,10,50],usr:[80,10,50]},cur=P.def.slice(),mode="def",lang="en",raf,ctOn=false;
 var el=function(i){return document.getElementById(i)},ids=["b","n","c"];
@@ -205,13 +247,69 @@ el("ct").addEventListener("click",function(){ctOn=!ctOn;ctUI()});
 function setLang(l){lang=l;document.documentElement.lang=l;
  document.querySelectorAll("[data-i]").forEach(function(e){e.textContent=T[l][e.dataset.i]});
  document.querySelectorAll("[data-l]").forEach(function(b){b.setAttribute("aria-pressed",b.dataset.l===l)});
- mark(mode);ctUI();document.title="Eyedim: "+T[l].h1;
+ mark(mode);ctUI();if(typeof testOn!=="undefined"&&testOn)tShow(true);document.title="Eyedim: "+T[l].h1;
  try{localStorage.setItem("lang",l)}catch(e){}}
 document.querySelectorAll("[data-l]").forEach(function(b){b.addEventListener("click",function(){setLang(b.dataset.l)})});
 var s=null;try{s=localStorage.getItem("lang")}catch(e){}
 var nl=((navigator.languages&&navigator.languages[0])||navigator.language||"en").toLowerCase();
 setLang(s==="ru"||s==="en"?s:(nl.indexOf("ru")===0?"ru":"en"));
 apply();
+/* display panel test: same 10 screens as the app (tray menu -> Test Display Panel) */
+var SOLIDS=["#000","#fff","#f00","#0f0","#00f","#808080"],TOTAL=10,ti=0,testOn=false,testUser=false,hintT=null,
+ tcv=el("tcv"),thint=el("thint"),tscr=el("scr");
+function px(v){return Math.round(v)+.5}
+function gridLines(g,w,h,cell,col){var cx=Math.floor(w/2),cy=Math.floor(h/2),x,y;g.strokeStyle=col;g.lineWidth=1;g.beginPath();
+ for(x=cx%cell;x<w;x+=cell){g.moveTo(px(x),0);g.lineTo(px(x),h)}
+ for(y=cy%cell;y<h;y+=cell){g.moveTo(0,px(y));g.lineTo(w,px(y))}g.stroke()}
+function drawGrid(g,w,h,div){g.fillStyle="#000";g.fillRect(0,0,w,h);
+ var coarse=Math.max(8,Math.round(Math.min(w,h)/12));gridLines(g,w,h,Math.max(4,Math.floor(coarse/div)),"#fff");
+ var e=Math.max(2,Math.round(w/960)),cx=Math.floor(w/2),cy=Math.floor(h/2);g.fillStyle="#fff";
+ g.fillRect(0,0,w,e);g.fillRect(0,h-e,w,e);g.fillRect(0,0,e,h);g.fillRect(w-e,0,e,h);
+ g.fillRect(cx-(e>>1),0,e,h);g.fillRect(0,cy-(e>>1),w,e)}
+function drawCard(g,w,h){g.fillStyle="#3c3c3c";g.fillRect(0,0,w,h);
+ var cell=Math.max(8,Math.round(Math.min(w,h)/10)),cx=w/2,cy=h/2,i;gridLines(g,w,h,cell,"#e8e8e8");
+ var cr=cell*.9;g.strokeStyle="#fff";g.lineWidth=Math.max(1,cell/20);
+ [[cr*1.3,cr*1.3],[w-cr*1.3,cr*1.3],[cr*1.3,h-cr*1.3],[w-cr*1.3,h-cr*1.3]].forEach(function(p){g.beginPath();g.arc(p[0],p[1],cr,0,Math.PI*2);g.stroke()});
+ var R=Math.round(Math.min(w,h)*.44),S=2*R,L=cx-R,T0=cy-R,b=S/6;
+ g.save();g.beginPath();g.arc(cx,cy,R,0,Math.PI*2);g.clip();g.fillStyle="#1a1a1a";g.fillRect(L,T0,S,S);
+ ["#fff","#ff0","#0ff","#0f0","#f0f","#f00","#00f","#000"].forEach(function(c,i){g.fillStyle=c;g.fillRect(L+i*S/8,T0,S/8+1,b*1.6)});
+ for(i=0;i<11;i++){var v=Math.round(i*25.5);g.fillStyle="rgb("+v+","+v+","+v+")";g.fillRect(L+i*S/11,T0+b*1.6,S/11+1,b*.9)}
+ var gr=g.createLinearGradient(L,0,L+S,0);gr.addColorStop(0,"#000");gr.addColorStop(1,"#fff");g.fillStyle=gr;g.fillRect(L,T0+b*2.5,S,b*.7);
+ [8,5,3,2,1].forEach(function(p,k){var gx=Math.round(L+S*.08+k*S*.17),gw=Math.round(S*.15),x;g.fillStyle="#000";g.fillRect(gx,T0+b*3.2,gw,b);
+  g.fillStyle="#fff";for(x=0;x<gw;x+=p*2)g.fillRect(gx+x,T0+b*3.2,Math.min(p,gw-x),b)});
+ ["#c00","#0a0","#00c"].forEach(function(c,i){g.fillStyle=c;g.fillRect(L+i*S/3,T0+b*4.2,S/3+1,b*.8)});
+ g.fillStyle="#fff";g.fillRect(L,T0+b*5,S,b+1);
+ g.fillStyle="#000";g.font="700 "+Math.round(R*.11)+"px Arial,sans-serif";g.textAlign="center";g.textBaseline="middle";g.fillText("EYEDIM",cx,T0+b*5.5);
+ g.restore();g.strokeStyle="#fff";g.lineWidth=Math.max(2,R/80);g.beginPath();g.arc(cx,cy,R,0,Math.PI*2);g.stroke();
+ g.lineWidth=Math.max(1,R/150);g.beginPath();g.moveTo(cx-R*.12,cy+R*.5);g.lineTo(cx+R*.12,cy+R*.5);g.stroke()}
+function tPaint(){var r=tscr.getBoundingClientRect(),d=window.devicePixelRatio||1,
+  w=Math.max(1,Math.round(r.width*d)),h=Math.max(1,Math.round(r.height*d));
+ if(tcv.width!==w||tcv.height!==h){tcv.width=w;tcv.height=h}
+ var g=tcv.getContext("2d");
+ if(ti<6){g.fillStyle=SOLIDS[ti];g.fillRect(0,0,w,h)}else if(ti<9)drawGrid(g,w,h,[1,4,8][ti-6]);else drawCard(g,w,h)}
+function tShow(quiet){tPaint();var n=T[lang].tn[ti];el("tnum").textContent=(ti+1)+" / "+TOTAL+" · "+n;
+ if(quiet&&thint.classList.contains("off"))return;
+ thint.textContent=(ti+1)+"/"+TOTAL+" · "+n+" · "+T[lang].th;thint.classList.remove("off");
+ clearTimeout(hintT);hintT=setTimeout(function(){thint.classList.add("off")},2500)}
+function tOpen(byUser){testUser=!!byUser;if(testOn){tShow();return}testOn=true;ti=0;
+ tcv.hidden=false;thint.hidden=false;el("tbar").hidden=false;tShow()}
+function tStep(dl){if(!testOn)return;ti=(ti+dl+TOTAL)%TOTAL;tShow()}
+function tClose(){if(!testOn)return;testOn=false;testUser=false;tcv.hidden=true;thint.hidden=true;el("tbar").hidden=true;clearTimeout(hintT);
+ if(document.fullscreenElement===tscr&&document.exitFullscreen)document.exitFullscreen().catch(function(){})}
+el("tmi").addEventListener("click",function(e){tOpen(e.isTrusted)});
+tcv.addEventListener("click",function(){tStep(1)});
+tcv.addEventListener("contextmenu",function(e){e.preventDefault();tStep(-1)});
+el("tnext").addEventListener("click",function(){tStep(1)});
+el("tprev").addEventListener("click",function(){tStep(-1)});
+el("tx").addEventListener("click",tClose);
+el("tfs").addEventListener("click",function(){if(!tscr.requestFullscreen)return;
+ try{tscr.requestFullscreen().catch(function(){})}catch(e){}});
+document.addEventListener("fullscreenchange",function(){if(testOn)requestAnimationFrame(function(){tShow()})});
+document.addEventListener("keydown",function(e){if(!testOn)return;var onBody=e.target===document.body||e.target===tscr;
+ if(e.key===" "&&onBody||e.key==="ArrowRight"){e.preventDefault();tStep(1)}
+ else if(e.key==="ArrowLeft"){e.preventDefault();tStep(-1)}
+ else if(e.key==="Escape"&&!document.fullscreenElement)tClose()});
+var tRz;window.addEventListener("resize",function(){if(!testOn)return;clearTimeout(tRz);tRz=setTimeout(function(){tPaint()},120)});
 /* self-playing demo with a fake mouse pointer; pauses when the visitor touches it */
 var reduceM=matchMedia("(prefers-reduced-motion: reduce)").matches,auto=!reduceM,tok=0,idleT=null,vis=true,
  demo=document.querySelector(".demo"),curEl=el("cur"),cx=0,cy=0;
@@ -238,21 +336,29 @@ async function clickEl(id,t){
  if(!await moveTo(r.left+r.width*.55-d.left,r.top+r.height*.5-d.top,900,t))return false;
  burst();if(!await wait(180,t))return false;
  el(id).click();return wait(300,t)}
+async function clickScr(t,n){
+ var r=el("scr").getBoundingClientRect(),d=demo.getBoundingClientRect();
+ if(!await moveTo(r.left-d.left+r.width*(.3+Math.random()*.4),r.top-d.top+r.height*(.3+Math.random()*.3),600,t))return false;
+ burst();if(!await wait(150,t))return false;tStep(n||1);return wait(900,t)}
 async function script(t){
  var r=el("scr").getBoundingClientRect(),d=demo.getBoundingClientRect();
  setCur(r.left-d.left+r.width*.75,r.top-d.top+r.height*.7);
- P.usr=[80,10,50];setCt(false);go("def",700);
+ tClose();P.usr=[80,10,50];setCt(false);go("def",700);
  var steps=[function(){return wait(900,t)},function(){return drag("b",45,t)},function(){return wait(500,t)},
   function(){return drag("n",60,t)},function(){return wait(500,t)},function(){return clickEl("ct",t)},
   function(){return wait(500,t)},function(){return drag("c",72,t)},function(){return wait(900,t)},
   function(){return clickEl("ct",t)},function(){return wait(900,t)},function(){return clickEl("mode",t)},
   function(){return wait(1500,t)},function(){return clickEl("mode",t)},function(){return wait(1500,t)},
-  function(){return clickEl("mode",t)},function(){return wait(1600,t)}];
+  function(){return clickEl("mode",t)},function(){return wait(1600,t)},
+  function(){return clickEl("tmi",t)},function(){return wait(1100,t)},
+  function(){return clickScr(t)},function(){return clickScr(t)},function(){return clickScr(t)},
+  function(){return clickScr(t,3)},function(){return clickScr(t)},
+  function(){return wait(1400,t)},function(){tClose();return wait(1200,t)}];
  for(var i=0;i<steps.length;i++){if(!await steps[i]())return false}
  return true}
 async function loop(t){while(t===tok&&auto&&vis&&!document.hidden){if(!await script(t))return}}
 function stopAuto(){tok++;cancelAnimationFrame(raf);curEl.classList.remove("down");curEl.style.opacity=0}
-function startAuto(){if(!auto||!vis||document.hidden)return;stopAuto();var t=tok;curEl.style.opacity=1;loop(t)}
+function startAuto(){if(!auto||!vis||document.hidden||testUser||document.fullscreenElement)return;stopAuto();var t=tok;curEl.style.opacity=1;loop(t)}
 function touched(){auto=false;stopAuto();clearTimeout(idleT);if(reduceM)return;
  idleT=setTimeout(function(){auto=true;startAuto()},12000)}
 ["pointerdown","keydown","input"].forEach(function(e){demo.addEventListener(e,touched)});
