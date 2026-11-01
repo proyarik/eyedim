@@ -458,33 +458,98 @@ def restore_original_brightness(timeout=3.0):
     th.join(timeout)
 
 # --- RE-APPLY AFTER SLEEP / DISPLAY CHANGE ---
+# Windows, the GPU driver and many monitors drop the gamma ramp (night light /
+# contrast) and sometimes the DDC/CI brightness when the screen is powered off
+# by the idle timeout, the PC wakes from sleep, or the session is unlocked.
+# None of those reliably sends WM_DISPLAYCHANGE, so we also subscribe to the
+# console display state and session lock notifications.
+REAPPLY_DELAYS = (1.5, 5.0)   # second pass catches late resets by driver/monitor
+
 def reapply_all():
+    if _shutting_down.is_set():
+        return
     request_gamma_update(current_night_light, effective_contrast())
     enqueue_brightness(current_brightness, force=True)
 
-def schedule_reapply(delay=1.0):
+def schedule_reapply(delays=REAPPLY_DELAYS):
     global _reapply_timer
-    if _shutting_down.is_set():
+    if _shutting_down.is_set() or not delays:
         return
     if _reapply_timer:
         _reapply_timer.cancel()
-    _reapply_timer = threading.Timer(delay, reapply_all)
+
+    first, rest = delays[0], delays[1:]
+
+    def fire():
+        reapply_all()
+        if rest:
+            schedule_reapply(tuple(d - first for d in rest))
+
+    _reapply_timer = threading.Timer(first, fire)
     _reapply_timer.daemon = True
     _reapply_timer.start()
 
 WM_DISPLAYCHANGE = 0x007E
 WM_POWERBROADCAST = 0x0218
+WM_WTSSESSION_CHANGE = 0x02B1
 PBT_APMRESUMESUSPEND = 0x0007
 PBT_APMRESUMEAUTOMATIC = 0x0012
+PBT_POWERSETTINGCHANGE = 0x8013
+WTS_CONSOLE_CONNECT = 0x1
+WTS_SESSION_UNLOCK = 0x8
+NOTIFY_FOR_THIS_SESSION = 0
+DEVICE_NOTIFY_WINDOW_HANDLE = 0
+DISPLAY_STATE_ON = 1          # 0 = off, 1 = on, 2 = dimmed
+
+class GUID(ctypes.Structure):
+    _fields_ = [("Data1", ctypes.c_uint32), ("Data2", ctypes.c_uint16),
+                ("Data3", ctypes.c_uint16), ("Data4", ctypes.c_ubyte * 8)]
+
+    def __eq__(self, other):
+        return bytes(self) == bytes(other)
+
+# GUID_CONSOLE_DISPLAY_STATE {6FE69556-704A-47A0-8F24-C28D936FDA47}
+GUID_CONSOLE_DISPLAY_STATE = GUID(
+    0x6FE69556, 0x704A, 0x47A0,
+    (ctypes.c_ubyte * 8)(0x8F, 0x24, 0xC2, 0x8D, 0x93, 0x6F, 0xDA, 0x47))
+
+class POWERBROADCAST_SETTING(ctypes.Structure):
+    _fields_ = [("PowerSetting", GUID), ("DataLength", ctypes.c_uint32),
+                ("Data", ctypes.c_uint32)]
 
 def start_display_watcher():
     def run():
         try:
-            def wndproc(hwnd, msg, wparam, lparam):
-                if msg == WM_DISPLAYCHANGE or (
-                        msg == WM_POWERBROADCAST and
-                        wparam in (PBT_APMRESUMESUSPEND, PBT_APMRESUMEAUTOMATIC)):
+            display_state = {"last": None}
+
+            def on_power_setting(lparam):
+                if not lparam:
+                    return
+                pbs = ctypes.cast(lparam, ctypes.POINTER(POWERBROADCAST_SETTING)).contents
+                if pbs.PowerSetting != GUID_CONSOLE_DISPLAY_STATE:
+                    return
+                state = pbs.Data
+                prev = display_state["last"]
+                display_state["last"] = state
+                # Windows sends the current state right after registering;
+                # only react to a real transition back to "on".
+                if state == DISPLAY_STATE_ON and prev is not None and prev != DISPLAY_STATE_ON:
                     schedule_reapply()
+
+            def wndproc(hwnd, msg, wparam, lparam):
+                try:
+                    if msg == WM_DISPLAYCHANGE:
+                        schedule_reapply()
+                    elif msg == WM_POWERBROADCAST:
+                        if wparam in (PBT_APMRESUMESUSPEND, PBT_APMRESUMEAUTOMATIC):
+                            schedule_reapply()
+                        elif wparam == PBT_POWERSETTINGCHANGE:
+                            on_power_setting(lparam)
+                    elif msg == WM_WTSSESSION_CHANGE:
+                        if wparam in (WTS_SESSION_UNLOCK, WTS_CONSOLE_CONNECT):
+                            schedule_reapply()
+                except Exception:
+                    pass
                 return win32gui.DefWindowProc(hwnd, msg, wparam, lparam)
 
             wc = win32gui.WNDCLASS()
@@ -492,7 +557,24 @@ def start_display_watcher():
             wc.lpszClassName = "EyedimWatcher"
             wc.lpfnWndProc = wndproc
             cls = win32gui.RegisterClass(wc)
-            win32gui.CreateWindow(cls, "EyedimWatcher", 0, 0, 0, 0, 0, 0, 0, wc.hInstance, None)
+            hwnd = win32gui.CreateWindow(cls, "EyedimWatcher", 0, 0, 0, 0, 0, 0, 0, wc.hInstance, None)
+
+            # screen turned off by idle timeout and back on
+            try:
+                reg = ctypes.windll.user32.RegisterPowerSettingNotification
+                reg.restype = ctypes.c_void_p
+                reg.argtypes = [wintypes.HANDLE, ctypes.POINTER(GUID), wintypes.DWORD]
+                reg(hwnd, ctypes.byref(GUID_CONSOLE_DISPLAY_STATE), DEVICE_NOTIFY_WINDOW_HANDLE)
+            except Exception as e:
+                print(f"Power setting notification error: {e}")
+
+            # lock screen -> unlock (often follows the idle screen-off)
+            try:
+                ctypes.windll.wtsapi32.WTSRegisterSessionNotification(
+                    wintypes.HWND(hwnd), NOTIFY_FOR_THIS_SESSION)
+            except Exception as e:
+                print(f"Session notification error: {e}")
+
             win32gui.PumpMessages()
         except Exception as e:
             print(f"Display watcher error: {e}")
