@@ -11,6 +11,7 @@
 box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px);color-scheme:dark}
 html{scroll-padding-top:env(safe-area-inset-top,0px)}
 *,*::before,*::after{box-sizing:inherit}
+[hidden]{display:none!important}
 body{margin:0;background:var(--bg);color:var(--text);font:400 17px/1.6 Onest,system-ui,"Segoe UI",sans-serif}
 .w{position:relative;z-index:1;max-width:1080px;margin:0 auto;padding:0 20px}
 .bg{position:fixed;right:-16vw;top:50%;width:min(980px,110vw);transform:translateY(-50%);opacity:.09;pointer-events:none;z-index:0;-webkit-mask-image:radial-gradient(circle,#000 44%,transparent 47%);mask-image:radial-gradient(circle,#000 44%,transparent 47%)}
@@ -65,9 +66,7 @@ input[type=range]::-moz-range-thumb{width:12px;height:12px;border:0;border-radiu
 @keyframes rip{0%{opacity:1;transform:scale(.3)}100%{opacity:0;transform:scale(1.6)}}
 @media (prefers-reduced-motion:reduce){.cur{display:none}}
 .scr #tcv{position:absolute;inset:0;width:100%;height:100%;display:block;cursor:pointer;z-index:2}
-.scr:fullscreen{border-radius:0;aspect-ratio:auto}.scr:fullscreen #tcv{cursor:none}
 .thint{position:absolute;left:50%;bottom:6%;z-index:3;transform:translateX(-50%);max-width:92%;background:rgba(20,20,20,.78);color:#eee;border:1px solid rgba(255,255,255,.14);border-radius:999px;padding:4px 12px;font:500 11px/1.4 "Segoe UI",system-ui,sans-serif;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;pointer-events:none;transition:opacity .6s}
-.scr:fullscreen .thint{font-size:15px;padding:7px 18px}
 .thint.off{opacity:0}
 .under{display:flex;flex-wrap:wrap;gap:16px;align-items:flex-start;justify-content:space-between;margin-top:20px}
 .under .pop{margin:0;flex:1 1 250px;max-width:310px;width:auto}
@@ -81,7 +80,6 @@ input[type=range]::-moz-range-thumb{width:12px;height:12px;border:0;border-radiu
 .tbar{display:flex;flex-wrap:wrap;gap:8px;margin:14px 0 0;align-items:center}
 .tbar button{background:none;border:1px solid var(--line);color:var(--text);border-radius:999px;padding:6px 14px;font:inherit;font-size:14px;cursor:pointer}
 .tbar button:hover{border-color:var(--amber)}
-.tbar #tfs{background:var(--amber);border-color:var(--amber);color:var(--ink);font-weight:700}
 .tbar span{color:var(--mute);font-size:13px;font-variant-numeric:tabular-nums;margin-left:auto}
 @media (prefers-reduced-motion:reduce){.thint{transition:none}}
 .dnote{font-size:13px;color:var(--mute);margin:14px 0 0}
@@ -154,7 +152,7 @@ footer a{color:var(--mute)}
     </div>
     <div class="tbar" id="tbar" hidden>
       <button type="button" id="tprev" aria-label="Back">←</button><button type="button" id="tnext" aria-label="Next">→</button>
-      <button type="button" id="tfs" data-i="tfs"></button><button type="button" id="tx" data-i="tx"></button>
+      <button type="button" id="tx" data-i="tx"></button>
       <span id="tnum"></span>
     </div>
     <p class="dnote"><span data-i="hint"></span> <span data-i="approx"></span></p>
@@ -206,7 +204,7 @@ l1:"Яркость внешних мониторов меняется по DDC/C
 l2:"Ночной свет и контраст программные: они меняют гамму через видеокарту и работают на любом мониторе, но не расширяют его возможности.",
 l3:"В режиме HDR и рядом с другими программами, меняющими гамму (например, f.lux), эффект может не примениться.",
 mcap:"Меню значка в трее",m1:"Открыть настройки",m2:"Проверка матрицы",m3:"О программе Eyedim",m4:"Выход",
-tfs:"На весь экран",tx:"Выйти из теста",th:"Щелчок — дальше · правая кнопка — назад · Esc — выход",
+tx:"Выйти из теста",th:"Щелчок — дальше · правая кнопка — назад · Esc — выход",
 tn:["Чёрный","Белый","Красный","Зелёный","Синий","Серый","Сетка","Мелкая сетка","Очень мелкая сетка","Настроечная таблица"],
 fh:"Eyedim бесплатна",fp:"Windows 10/11, 14,8 МБ, без установки. Исходный код открыт.",gh:"Код на GitHub"},
 en:{h1:"Brightness, night light and contrast: set in a second",lead:"Your own and the default mode switch with one click from the tray. Easier on your eyes.",dl:"Download free",size:"14.8 MB",
@@ -223,7 +221,7 @@ l1:"External monitor brightness is set over DDC/CI. Some models need it enabled 
 l2:"Night light and contrast are software-based: they change gamma through the graphics card and work on any monitor, but they don't extend its capabilities.",
 l3:"In HDR mode and alongside other tools that change gamma (such as f.lux), the effect may not apply.",
 mcap:"Tray icon menu",m1:"Open Settings",m2:"Test Display Panel",m3:"About Eyedim",m4:"Exit",
-tfs:"Full screen",tx:"Exit test",th:"Click: next · right-click: back · Esc: exit",
+tx:"Exit test",th:"Click: next · right-click: back · Esc: exit",
 tn:["Black","White","Red","Green","Blue","Gray","Grid","Fine grid","Very fine grid","Test card"],
 fh:"Eyedim is free",fp:"Windows 10/11, 14.8 MB, no installation. Source code is open.",gh:"Code on GitHub"}};
 var P={def:[80,10,50],usr:[80,10,50]},cur=P.def.slice(),mode="def",lang="en",raf,ctOn=false;
@@ -295,20 +293,17 @@ function tOpen(byUser){testUser=!!byUser;if(testOn){tShow();return}testOn=true;t
  tcv.hidden=false;thint.hidden=false;el("tbar").hidden=false;tShow()}
 function tStep(dl){if(!testOn)return;ti=(ti+dl+TOTAL)%TOTAL;tShow()}
 function tClose(){if(!testOn)return;testOn=false;testUser=false;tcv.hidden=true;thint.hidden=true;el("tbar").hidden=true;clearTimeout(hintT);
- if(document.fullscreenElement===tscr&&document.exitFullscreen)document.exitFullscreen().catch(function(){})}
+}
 el("tmi").addEventListener("click",function(e){tOpen(e.isTrusted)});
-tcv.addEventListener("click",function(){tStep(1)});
-tcv.addEventListener("contextmenu",function(e){e.preventDefault();tStep(-1)});
-el("tnext").addEventListener("click",function(){tStep(1)});
-el("tprev").addEventListener("click",function(){tStep(-1)});
+tcv.addEventListener("click",function(e){if(e.isTrusted)testUser=true;tStep(1)});
+tcv.addEventListener("contextmenu",function(e){e.preventDefault();testUser=true;tStep(-1)});
+el("tnext").addEventListener("click",function(){testUser=true;tStep(1)});
+el("tprev").addEventListener("click",function(){testUser=true;tStep(-1)});
 el("tx").addEventListener("click",tClose);
-el("tfs").addEventListener("click",function(){if(!tscr.requestFullscreen)return;
- try{tscr.requestFullscreen().catch(function(){})}catch(e){}});
-document.addEventListener("fullscreenchange",function(){if(testOn)requestAnimationFrame(function(){tShow()})});
 document.addEventListener("keydown",function(e){if(!testOn)return;var onBody=e.target===document.body||e.target===tscr;
  if(e.key===" "&&onBody||e.key==="ArrowRight"){e.preventDefault();tStep(1)}
  else if(e.key==="ArrowLeft"){e.preventDefault();tStep(-1)}
- else if(e.key==="Escape"&&!document.fullscreenElement)tClose()});
+ else if(e.key==="Escape")tClose()});
 var tRz;window.addEventListener("resize",function(){if(!testOn)return;clearTimeout(tRz);tRz=setTimeout(function(){tPaint()},120)});
 /* self-playing demo with a fake mouse pointer; pauses when the visitor touches it */
 var reduceM=matchMedia("(prefers-reduced-motion: reduce)").matches,auto=!reduceM,tok=0,idleT=null,vis=true,
@@ -358,7 +353,7 @@ async function script(t){
  return true}
 async function loop(t){while(t===tok&&auto&&vis&&!document.hidden){if(!await script(t))return}}
 function stopAuto(){tok++;cancelAnimationFrame(raf);curEl.classList.remove("down");curEl.style.opacity=0}
-function startAuto(){if(!auto||!vis||document.hidden||testUser||document.fullscreenElement)return;stopAuto();var t=tok;curEl.style.opacity=1;loop(t)}
+function startAuto(){if(!auto||!vis||document.hidden||testUser)return;stopAuto();var t=tok;curEl.style.opacity=1;loop(t)}
 function touched(){auto=false;stopAuto();clearTimeout(idleT);if(reduceM)return;
  idleT=setTimeout(function(){auto=true;startAuto()},12000)}
 ["pointerdown","keydown","input"].forEach(function(e){demo.addEventListener(e,touched)});
