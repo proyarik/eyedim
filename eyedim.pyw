@@ -208,7 +208,7 @@ def schedule_save():
 
 popup_window = None
 about_window = None
-panel_test_window = None
+panel_test_windows = []                # one full-screen window per monitor
 tray_icon_ref = None
 brightness_slider_ref = None
 night_slider_ref = None
@@ -432,7 +432,7 @@ def request_gamma_update(nl=None, c=None, instant=False):
 def gamma_target():
     """Night light / contrast that should be on screen right now. The display
     panel test needs true colours, so it keeps the ramp neutral while open."""
-    if panel_test_window is not None:
+    if panel_test_windows:
         return 0, 50
     return current_night_light, effective_contrast()
 
@@ -1392,13 +1392,12 @@ def _show_popup_ui():
 
 # --- DISPLAY PANEL TEST ---
 # Full-screen solid colours and test patterns for checking a monitor for dead
-# or stuck pixels, backlight bleed and geometry. Opens on the monitor under the
-# mouse cursor; night light and contrast are kept neutral while it is open.
+# or stuck pixels, backlight bleed and geometry. Opens on every monitor at once
+# (all show the same screen); night light and contrast stay neutral meanwhile.
 PANEL_TEST_SOLIDS = [(0, 0, 0), (255, 255, 255), (255, 0, 0),
                      (0, 255, 0), (0, 0, 255), (128, 128, 128)]
 PANEL_TEST_HINT_MS = 2500
 DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = -4
-MONITOR_DEFAULTTONEAREST = 2
 
 def _grid_lines(draw, w, h, cell, color):
     """1 px lines every `cell` pixels, aligned so that lines cross the centre."""
@@ -1481,39 +1480,50 @@ PANEL_TEST_PATTERNS = [lambda w, h: render_grid(w, h),
                        lambda w, h: render_grid(w, h, fine=True),
                        render_test_card]
 
-def _monitor_rect_under_cursor():
-    x, y = win32api.GetCursorPos()
-    mon = win32api.MonitorFromPoint((x, y), MONITOR_DEFAULTTONEAREST)
-    return win32api.GetMonitorInfo(mon)["Monitor"]
+def _monitor_rects():
+    """Rectangles of all monitors; the one under the mouse cursor goes first."""
+    rects = []
+    try:
+        cursor = win32api.GetCursorPos()
+        for _h, _dc, rect in win32api.EnumDisplayMonitors(None, None):
+            l, t_, r, b = rect
+            under = l <= cursor[0] < r and t_ <= cursor[1] < b
+            rects.insert(0, rect) if under else rects.append(rect)
+    except Exception:
+        pass
+    if not rects:
+        rects = [(0, 0, root_window.winfo_screenwidth(), root_window.winfo_screenheight())]
+    return rects
 
 def show_panel_test(icon=None, item=None):
     ui_call(_toggle_panel_test)
 
 def _toggle_panel_test():
-    if panel_test_window is not None:
+    if panel_test_windows:
         close_panel_test()
     else:
         _open_panel_test()
 
 def close_panel_test(restore_gamma=True):
-    global panel_test_window
-    win = panel_test_window
-    if win is None:
+    global panel_test_windows
+    wins = panel_test_windows
+    if not wins:
         return
-    panel_test_window = None
-    try:
-        win.destroy()
-    except Exception:
-        pass
+    panel_test_windows = []
+    for win in wins:
+        try:
+            win.destroy()
+        except Exception:
+            pass
     if restore_gamma and not _shutting_down.is_set():
         request_gamma_update(*gamma_target())
 
 def _open_panel_test():
-    global panel_test_window
+    global panel_test_windows
     close_popup()
     close_about()
 
-    # Create the window per-monitor DPI aware, so that on a scaled display
+    # Create the windows per-monitor DPI aware, so that on a scaled display
     # (125 %, 150 % ...) every pattern pixel is one physical pixel and Windows
     # does not blur the picture. The rest of the app stays as it is.
     user32 = ctypes.windll.user32
@@ -1525,22 +1535,19 @@ def _open_panel_test():
             ctypes.c_void_p(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2))
     except Exception:
         old_ctx = None
+    screens = []                                # (window, canvas, w, h) per monitor
     try:
-        try:
-            left, top, right, bottom = _monitor_rect_under_cursor()
-        except Exception:
-            left, top = 0, 0
-            right, bottom = root_window.winfo_screenwidth(), root_window.winfo_screenheight()
-        w, h = right - left, bottom - top
-
-        win = tk.Toplevel(root_window, bg="black")
-        win.overrideredirect(True)
-        win.attributes("-topmost", True)
-        win.geometry(f"{w}x{h}+{left}+{top}")
-        canvas = tk.Canvas(win, width=w, height=h, bg="black",
-                           highlightthickness=0, cursor="none")
-        canvas.pack(fill=tk.BOTH, expand=True)
-        win.update_idletasks()
+        for left, top, right, bottom in _monitor_rects():
+            w, h = right - left, bottom - top
+            win = tk.Toplevel(root_window, bg="black")
+            win.overrideredirect(True)
+            win.attributes("-topmost", True)
+            win.geometry(f"{w}x{h}+{left}+{top}")
+            canvas = tk.Canvas(win, width=w, height=h, bg="black",
+                               highlightthickness=0, cursor="none")
+            canvas.pack(fill=tk.BOTH, expand=True)
+            screens.append((win, canvas, w, h))
+        root_window.update_idletasks()
     finally:
         if old_ctx:
             try:
@@ -1548,33 +1555,33 @@ def _open_panel_test():
             except Exception:
                 pass
 
-    panel_test_window = win
+    panel_test_windows = [s[0] for s in screens]
     request_gamma_update(0, 50, instant=True)
 
     total = len(PANEL_TEST_SOLIDS) + len(PANEL_TEST_PATTERNS)
     state = {"i": 0, "hint_job": None}
-    photos = {}                                 # rendered patterns, per window
-    font_px = max(11, h // 70)
+    photos = {}                                 # (pattern, w, h) -> PhotoImage
 
     def hide_hint():
         state["hint_job"] = None
-        canvas.delete("hint")
+        for _win, canvas, _w, _h in screens:
+            canvas.delete("hint")
 
-    def show():
-        i = state["i"]
+    def draw(canvas, w, h, i):
         canvas.delete("all")
         if i < len(PANEL_TEST_SOLIDS):
             canvas.config(bg="#%02x%02x%02x" % PANEL_TEST_SOLIDS[i])
-        else:
-            if i not in photos:
-                from PIL import ImageTk
-                img = PANEL_TEST_PATTERNS[i - len(PANEL_TEST_SOLIDS)](w, h)
-                photos[i] = ImageTk.PhotoImage(img)
-            canvas.config(bg="black")
-            canvas.create_image(0, 0, image=photos[i], anchor="nw")
+            return
+        key = (i, w, h)
+        if key not in photos:
+            from PIL import ImageTk
+            img = PANEL_TEST_PATTERNS[i - len(PANEL_TEST_SOLIDS)](w, h)
+            photos[key] = ImageTk.PhotoImage(img, master=canvas)
+        canvas.config(bg="black")
+        canvas.create_image(0, 0, image=photos[key], anchor="nw")
 
-        names = t("test_screens")
-        text = t("test_hint").format(i + 1, total, names[i] if i < len(names) else "")
+    def draw_hint(canvas, w, h, text):
+        font_px = max(11, h // 70)
         tid = canvas.create_text(w // 2, h - h // 16, text=text, fill="#eeeeee",
                                  font=("Segoe UI", -font_px), tags="hint")
         x0, y0, x1, y1 = canvas.bbox(tid)
@@ -1582,27 +1589,38 @@ def _open_panel_test():
         bg = canvas.create_rectangle(x0 - pad * 2, y0 - pad, x1 + pad * 2, y1 + pad,
                                      fill="#202020", outline="#3a3a3a", tags="hint")
         canvas.tag_lower(bg, tid)
+
+    def show():
+        i = state["i"]
+        names = t("test_screens")
+        text = t("test_hint").format(i + 1, total, names[i] if i < len(names) else "")
+        for _win, canvas, w, h in screens:
+            draw(canvas, w, h, i)
+            draw_hint(canvas, w, h, text)
         if state["hint_job"]:
-            canvas.after_cancel(state["hint_job"])
-        state["hint_job"] = canvas.after(PANEL_TEST_HINT_MS, hide_hint)
+            root_window.after_cancel(state["hint_job"])
+        state["hint_job"] = root_window.after(PANEL_TEST_HINT_MS, hide_hint)
 
     def step(delta):
+        if not panel_test_windows:
+            return
         state["i"] = (state["i"] + delta) % total
         show()
 
-    win.bind("<Button-1>", lambda e: step(1))
-    win.bind("<space>", lambda e: step(1))
-    win.bind("<Right>", lambda e: step(1))
-    win.bind("<Return>", lambda e: step(1))
-    win.bind("<Button-3>", lambda e: step(-1))
-    win.bind("<Left>", lambda e: step(-1))
-    win.bind("<BackSpace>", lambda e: step(-1))
-    win.bind("<Escape>", lambda e: close_panel_test())
+    for win, _canvas, _w, _h in screens:
+        win.bind("<Button-1>", lambda e: step(1))
+        win.bind("<space>", lambda e: step(1))
+        win.bind("<Right>", lambda e: step(1))
+        win.bind("<Return>", lambda e: step(1))
+        win.bind("<Button-3>", lambda e: step(-1))
+        win.bind("<Left>", lambda e: step(-1))
+        win.bind("<BackSpace>", lambda e: step(-1))
+        win.bind("<Escape>", lambda e: close_panel_test())
 
     show()
-    win.deiconify()
-    win.lift()
-    win.focus_force()
+    for win, _canvas, _w, _h in screens:
+        win.lift()
+    screens[0][0].focus_force()             # keyboard goes to the cursor's monitor
 
 # --- QUIT ---
 def quit_app(icon, item):
