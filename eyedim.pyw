@@ -466,93 +466,238 @@ def gamma_worker():
 
 threading.Thread(target=gamma_worker, daemon=True).start()
 
+# --- FAST DDC/CI WRITERS ---
+# sbc.set_brightness() re-enumerates monitors (WMI + dxva2) on every call and
+# writes the displays one after another, which is ~130 ms per step on two
+# external monitors: far too slow for a smooth fade. While fading we keep the
+# physical monitor handles open and give every monitor its own writer thread
+# that sends only the latest value (SetVCPFeature, VCP code 0x10), so the
+# monitors update in parallel at their own DDC/CI speed. Used only when every
+# display is an external DDC/CI monitor; otherwise sbc is used as before.
+# Forced writes (startup, wake, display change, retries) always go through
+# sbc and re-open the handles afterwards, since old handles may be stale.
+VCP_BRIGHTNESS = 0x10
+
+class _PHYSICAL_MONITOR(ctypes.Structure):
+    _fields_ = [("handle", wintypes.HANDLE), ("description", wintypes.WCHAR * 128)]
+
+_vcp_failures = 0
+VCP_MAX_FAILURES = 2                # then stay on sbc for the rest of the session
+
+class _VcpWriter:
+    def __init__(self, handle, on_fail):
+        self.handle = handle
+        self.on_fail = on_fail
+        self.value = None
+        self.written = None
+        self.alive = True
+        self.event = threading.Event()
+        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.thread.start()
+
+    def post(self, value):
+        self.value = value
+        self.event.set()
+
+    def close(self):
+        self.alive = False
+        self.event.set()
+
+    def _run(self):
+        dxva2 = ctypes.windll.dxva2
+        try:
+            while True:
+                self.event.wait()
+                self.event.clear()
+                if not self.alive:
+                    return
+                v = self.value
+                if v is None or v == self.written:
+                    continue
+                for _ in range(3):
+                    if dxva2.SetVCPFeature(self.handle, VCP_BRIGHTNESS, v):
+                        self.written = v
+                        schedule_gamma_restore(GAMMA_RESTORE_DELAY)
+                        break
+                    time.sleep(0.02)
+                else:
+                    self.on_fail()
+                    return
+        finally:
+            try:
+                dxva2.DestroyPhysicalMonitor(self.handle)
+            except Exception:
+                pass
+
+def _open_vcp_writers(on_fail):
+    """Writers for all monitors, or None if the fast path can't be used."""
+    if _vcp_failures >= VCP_MAX_FAILURES:
+        return None
+    handles = []
+    try:
+        infos = sbc.list_monitors_info()
+        if not infos or not all(
+                "VCP" in getattr(i.get("method"), "__name__", str(i.get("method")))
+                for i in infos):
+            return None
+        dxva2 = ctypes.windll.dxva2
+        dxva2.SetVCPFeature.argtypes = (wintypes.HANDLE, wintypes.BYTE, wintypes.DWORD)
+        dxva2.DestroyPhysicalMonitor.argtypes = (wintypes.HANDLE,)
+        for m in win32api.EnumDisplayMonitors():
+            hmon = wintypes.HMONITOR(m[0].handle)
+            count = wintypes.DWORD()
+            if not dxva2.GetNumberOfPhysicalMonitorsFromHMONITOR(hmon, ctypes.byref(count)):
+                raise OSError("GetNumberOfPhysicalMonitorsFromHMONITOR failed")
+            if count.value:
+                arr = (_PHYSICAL_MONITOR * count.value)()
+                if not dxva2.GetPhysicalMonitorsFromHMONITOR(hmon, count.value, arr):
+                    raise OSError("GetPhysicalMonitorsFromHMONITOR failed")
+                handles.extend(p.handle for p in arr)
+        # pseudo/duplicate monitors would make the mapping unclear: use sbc then
+        if len(handles) != len(infos):
+            raise OSError("monitor count mismatch")
+        return [_VcpWriter(h, on_fail) for h in handles]
+    except Exception:
+        for h in handles:
+            try:
+                ctypes.windll.dxva2.DestroyPhysicalMonitor(h)
+            except Exception:
+                pass
+        return None
+
+def _close_vcp_writers(writers):
+    for w in writers or ():
+        w.close()
+    for w in writers or ():
+        w.thread.join(0.3)          # let an in-flight write finish first
+
 # --- BRIGHTNESS WORKER (smooth transitions) ---
-# Large brightness changes fade with the same smoothstep curve as night light:
-# the value for "now" is computed from the elapsed time and written in 1 %
-# steps. Slow hardware (DDC/CI monitors) simply gets fewer writes within the
-# same fade time, so the fade never lags behind; identical values are skipped
-# and writes are spaced by at least BRIGHTNESS_FRAME. A new target mid-fade
-# retargets from the value on screen; forced writes (startup, wake, retries)
-# jump directly.
+# The brightness on screen follows the slider through a critically damped
+# spring: it accelerates softly, never overshoots, and when the target keeps
+# moving (slider drag) it simply keeps following without stopping or
+# restarting. The spring runs on real elapsed time and the writers always send
+# the newest value, so slow hardware gets fewer writes on the same smooth
+# curve instead of falling behind. DDC/CI monitors get a longer fade so each
+# step stays small. Forced writes (startup, wake, retries) jump directly.
 brightness_queue = queue.Queue()
-BRIGHTNESS_STEP = 5                 # targets are snapped to 5 % steps
-BRIGHTNESS_FADE_FULL = 0.8          # seconds for a full 0 -> 100 change
-BRIGHTNESS_FRAME = 1.0 / 40         # min spacing between fade writes
-BRIGHTNESS_INSTANT_DELTA = 5        # small steps (slider drag) apply at once
+BRIGHTNESS_SPRING_DDC = 3.5         # 1/s; 0 -> 100 settles in ~1.6 s
+BRIGHTNESS_SPRING_FAST = 7.0        # laptop panels (WMI): ~0.8 s
+BRIGHTNESS_FRAME = 1.0 / 40         # spring update rate while fading
 GAMMA_RESTORE_DELAY = 0.12
 MAX_BRIGHTNESS_RETRIES = 3          # quick retries: 0.5 s, 1 s, 1.5 s
 desired_brightness = current_brightness
 
 def brightness_worker():
+    global _vcp_failures
     last_applied = -1
     fail_streak = 0
     target = None
     force = False
-    fade = None                     # (from, to, t0, dur) of the running fade
+    pos = vel = 0.0                 # spring state (value on screen, %/s)
+    last_t = time.monotonic()
+    writers = None
+    vcp_broken = threading.Event()
 
-    while True:
-        if target is None:
-            item = brightness_queue.get()
-            if item is None:
-                return
-            target, force = item
-        # coalesce everything queued so far: only the latest target matters
+    def on_vcp_fail():
+        vcp_broken.set()
+        brightness_queue.put((desired_brightness, True))   # wake + resync via sbc
+
+    def schedule_retry():
+        nonlocal fail_streak
+        if fail_streak < MAX_BRIGHTNESS_RETRIES:
+            fail_streak += 1
+            tm = threading.Timer(0.5 * fail_streak,
+                                 lambda: enqueue_brightness(desired_brightness, force=True))
+            tm.daemon = True
+            tm.start()
+
+    try:
         while True:
-            try:
-                nxt = brightness_queue.get_nowait()
-            except queue.Empty:
-                break
-            if nxt is None:
-                return
-            target = nxt[0]
-            force = force or nxt[1]
-        if _shutting_down.is_set():
-            target = None
-            continue
-        if target == last_applied and not force:
-            target, fade = None, None
-            continue
-
-        now = time.monotonic()
-        if force or last_applied < 0 or abs(target - last_applied) <= BRIGHTNESS_INSTANT_DELTA:
-            fade = None
-            val = target
-        else:
-            if fade is None or fade[1] != target:
-                fade = (last_applied, target, now,
-                        BRIGHTNESS_FADE_FULL * abs(target - last_applied) / 100.0)
-            a, b, t0, dur = fade
-            p = min(1.0, (now - t0) / dur) if dur > 0 else 1.0
-            p = p * p * (3 - 2 * p)
-            val = int(round(a + (b - a) * p))
-            if val == last_applied:
-                # not enough time has passed for a new 1 % step yet
-                if _shutting_down.wait(BRIGHTNESS_FRAME):
-                    target = None
-                continue
-        try:
-            sbc.set_brightness(val)
-            last_applied = val
-            fail_streak = 0
-            force = False
-            schedule_gamma_restore(GAMMA_RESTORE_DELAY)
-        except Exception:
-            target, fade = None, None
-            force = False
-            if fail_streak < MAX_BRIGHTNESS_RETRIES:
-                fail_streak += 1
-                tm = threading.Timer(0.5 * fail_streak,
-                                     lambda: enqueue_brightness(desired_brightness, force=True))
-                tm.daemon = True
-                tm.start()
-            continue
-
-        if val == target:
-            target, fade = None, None
-        else:
-            spent = time.monotonic() - now
-            if _shutting_down.wait(max(0.0, BRIGHTNESS_FRAME - spent)):
+            if target is None:
+                item = brightness_queue.get()
+                if item is None:
+                    return
+                target, force = item
+                pos, vel = float(max(last_applied, 0)), 0.0
+                last_t = time.monotonic()
+            # coalesce everything queued so far: only the latest target matters
+            while True:
+                try:
+                    nxt = brightness_queue.get_nowait()
+                except queue.Empty:
+                    break
+                if nxt is None:
+                    return
+                target = nxt[0]
+                force = force or nxt[1]
+            if _shutting_down.is_set():
                 target = None
+                continue
+            if vcp_broken.is_set():
+                vcp_broken.clear()
+                _vcp_failures += 1
+                _close_vcp_writers(writers)
+                writers = None
+                force = True
+
+            if force or last_applied < 0:
+                # direct, robust write through sbc
+                _close_vcp_writers(writers)
+                writers = None
+                try:
+                    sbc.set_brightness(target)
+                except Exception:
+                    target = None
+                    force = False
+                    schedule_retry()
+                    continue
+                last_applied = target
+                pos, vel = float(target), 0.0
+                fail_streak = 0
+                force = False
+                target = None
+                schedule_gamma_restore(GAMMA_RESTORE_DELAY)
+                writers = _open_vcp_writers(on_vcp_fail)
+                continue
+
+            now = time.monotonic()
+            dt, last_t = now - last_t, now
+            # exact critically damped step: stable for any dt
+            w = BRIGHTNESS_SPRING_DDC if writers else BRIGHTNESS_SPRING_FAST
+            x = pos - target
+            k = vel + w * x
+            e = math.exp(-w * dt)
+            pos = target + (x + k * dt) * e
+            vel = (vel - k * w * dt) * e
+            if abs(pos - target) < 1.0 and abs(vel) < 3.0:
+                pos, vel = float(target), 0.0
+            val = max(0, min(100, int(round(pos))))
+            settled = pos == target and vel == 0.0
+
+            if val != last_applied:
+                if writers:
+                    for wr in writers:
+                        wr.post(val)            # non-blocking, latest value wins
+                    last_applied = val
+                else:
+                    try:
+                        sbc.set_brightness(val)
+                        last_applied = val
+                        fail_streak = 0
+                        schedule_gamma_restore(GAMMA_RESTORE_DELAY)
+                    except Exception:
+                        target = None
+                        schedule_retry()
+                        continue
+
+            if settled:
+                target = None
+            else:
+                spent = time.monotonic() - now
+                if _shutting_down.wait(max(0.0, BRIGHTNESS_FRAME - spent)):
+                    target = None
+    finally:
+        _close_vcp_writers(writers)
 
 brightness_thread = threading.Thread(target=brightness_worker, daemon=True)
 brightness_thread.start()
@@ -561,9 +706,9 @@ def enqueue_brightness(value, force=False):
     global desired_brightness
     if _shutting_down.is_set():
         return
-    snapped = max(0, min(100, int(round(value / BRIGHTNESS_STEP)) * BRIGHTNESS_STEP))
-    desired_brightness = snapped
-    brightness_queue.put((snapped, force))
+    value = max(0, min(100, int(round(value))))
+    desired_brightness = value
+    brightness_queue.put((value, force))
 
 def restore_original_brightness(timeout=3.0):
     vals = original_brightness
