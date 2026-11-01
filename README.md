@@ -11,6 +11,7 @@ Lightweight Windows utility to control display **brightness**, **night light** a
 - Contrast adjustment via gamma ramp
 - System tray icon showing current brightness
 - "User" and "Default" preset modes
+- Display panel test from the tray menu: full-screen colours (black, white, red, green, blue, gray), coarse and fine grids and a test card for checking dead pixels, backlight bleed and geometry
 - Autostart with Windows
 - English / Russian interface
 
