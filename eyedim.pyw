@@ -22,7 +22,7 @@ from array import array
 
 # --- SYSTEM CONSTANTS ---
 DWMWA_WINDOW_CORNER_PREFERENCE = 33
-APP_VERSION = "v2.0.9"
+APP_VERSION = "v2.0.10"
 DONATE_URL = "https://your-donation-link.com"
 
 # --- DEFAULTS / LOOK (kept in sync with the web page demo) ---
