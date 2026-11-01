@@ -22,7 +22,7 @@ from array import array
 
 # --- SYSTEM CONSTANTS ---
 DWMWA_WINDOW_CORNER_PREFERENCE = 33
-APP_VERSION = "v2.0.8"
+APP_VERSION = "v2.0.9"
 DONATE_URL = "https://your-donation-link.com"
 
 # --- DEFAULTS / LOOK (kept in sync with the web page demo) ---
@@ -467,14 +467,18 @@ def gamma_worker():
 threading.Thread(target=gamma_worker, daemon=True).start()
 
 # --- BRIGHTNESS WORKER (smooth transitions) ---
-# Hardware brightness (DDC/CI or WMI) is slow and some monitors misbehave on
-# rapid writes, so large jumps are split into steps of BRIGHTNESS_FADE_STEP
-# (at most 10 writes for 0 -> 100) with a short pause between them. New targets arriving mid-fade
-# retarget it immediately; forced writes (startup, wake, retries) jump directly.
+# Large brightness changes fade with the same smoothstep curve as night light:
+# the value for "now" is computed from the elapsed time and written in 1 %
+# steps. Slow hardware (DDC/CI monitors) simply gets fewer writes within the
+# same fade time, so the fade never lags behind; identical values are skipped
+# and writes are spaced by at least BRIGHTNESS_FRAME. A new target mid-fade
+# retargets from the value on screen; forced writes (startup, wake, retries)
+# jump directly.
 brightness_queue = queue.Queue()
-BRIGHTNESS_STEP = 5
-BRIGHTNESS_FADE_STEP = 10           # max change per write while fading
-BRIGHTNESS_FADE_PAUSE = 0.05        # pause between fade writes
+BRIGHTNESS_STEP = 5                 # targets are snapped to 5 % steps
+BRIGHTNESS_FADE_FULL = 0.8          # seconds for a full 0 -> 100 change
+BRIGHTNESS_FRAME = 1.0 / 40         # min spacing between fade writes
+BRIGHTNESS_INSTANT_DELTA = 5        # small steps (slider drag) apply at once
 GAMMA_RESTORE_DELAY = 0.12
 MAX_BRIGHTNESS_RETRIES = 3          # quick retries: 0.5 s, 1 s, 1.5 s
 desired_brightness = current_brightness
@@ -484,6 +488,7 @@ def brightness_worker():
     fail_streak = 0
     target = None
     force = False
+    fade = None                     # (from, to, t0, dur) of the running fade
 
     while True:
         if target is None:
@@ -505,14 +510,26 @@ def brightness_worker():
             target = None
             continue
         if target == last_applied and not force:
-            target = None
+            target, fade = None, None
             continue
 
-        if force or last_applied < 0:
+        now = time.monotonic()
+        if force or last_applied < 0 or abs(target - last_applied) <= BRIGHTNESS_INSTANT_DELTA:
+            fade = None
             val = target
         else:
-            step = BRIGHTNESS_FADE_STEP
-            val = last_applied + max(-step, min(step, target - last_applied))
+            if fade is None or fade[1] != target:
+                fade = (last_applied, target, now,
+                        BRIGHTNESS_FADE_FULL * abs(target - last_applied) / 100.0)
+            a, b, t0, dur = fade
+            p = min(1.0, (now - t0) / dur) if dur > 0 else 1.0
+            p = p * p * (3 - 2 * p)
+            val = int(round(a + (b - a) * p))
+            if val == last_applied:
+                # not enough time has passed for a new 1 % step yet
+                if _shutting_down.wait(BRIGHTNESS_FRAME):
+                    target = None
+                continue
         try:
             sbc.set_brightness(val)
             last_applied = val
@@ -520,7 +537,7 @@ def brightness_worker():
             force = False
             schedule_gamma_restore(GAMMA_RESTORE_DELAY)
         except Exception:
-            target = None
+            target, fade = None, None
             force = False
             if fail_streak < MAX_BRIGHTNESS_RETRIES:
                 fail_streak += 1
@@ -531,9 +548,11 @@ def brightness_worker():
             continue
 
         if val == target:
-            target = None
-        elif _shutting_down.wait(BRIGHTNESS_FADE_PAUSE):
-            target = None
+            target, fade = None, None
+        else:
+            spent = time.monotonic() - now
+            if _shutting_down.wait(max(0.0, BRIGHTNESS_FRAME - spent)):
+                target = None
 
 brightness_thread = threading.Thread(target=brightness_worker, daemon=True)
 brightness_thread.start()
