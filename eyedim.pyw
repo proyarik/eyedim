@@ -63,7 +63,7 @@ TRANSLATIONS = {
         "tooltip_format_short": "Eyedim — Brightness: {}% | Night Light: {}%",
         "test_hint": "{}/{} · {} · Click or Space: next · Right-click or ←: back · Esc: exit",
         "test_screens": ["Black", "White", "Red", "Green", "Blue", "Gray",
-                         "Grid", "Fine grid", "Test card"]
+                         "Grid", "Fine grid", "Very fine grid", "Test card"]
     },
     "ru": {
         "menu_settings": "Открыть настройки",
@@ -84,7 +84,7 @@ TRANSLATIONS = {
         "tooltip_format_short": "Eyedim — Яркость: {}% | Ночной свет: {}%",
         "test_hint": "{}/{} · {} · Щелчок или пробел — дальше · Правая кнопка или ← — назад · Esc — выход",
         "test_screens": ["Чёрный", "Белый", "Красный", "Зелёный", "Синий", "Серый",
-                         "Сетка", "Мелкая сетка", "Настроечная таблица"]
+                         "Сетка", "Мелкая сетка", "Очень мелкая сетка", "Настроечная таблица"]
     }
 }
 
@@ -1407,11 +1407,12 @@ def _grid_lines(draw, w, h, cell, color):
     for y in range(cy % cell, h, cell):
         draw.line([(0, y), (w - 1, y)], fill=color)
 
-def render_grid(w, h, fine=False):
+def render_grid(w, h, divisor=1):
+    """Grid of ~12 cells across the short side, `divisor` times finer."""
     img = Image.new("RGB", (w, h), (0, 0, 0))
     d = ImageDraw.Draw(img)
     coarse = max(8, round(min(w, h) / 12))
-    _grid_lines(d, w, h, max(6, coarse // 4) if fine else coarse, (255, 255, 255))
+    _grid_lines(d, w, h, max(4, coarse // divisor), (255, 255, 255))
     edge = max(2, round(w / 960))
     d.rectangle([0, 0, w - 1, h - 1], outline=(255, 255, 255), width=edge)
     cx, cy = w // 2, h // 2
@@ -1477,7 +1478,8 @@ def render_test_card(w, h):
     return img
 
 PANEL_TEST_PATTERNS = [lambda w, h: render_grid(w, h),
-                       lambda w, h: render_grid(w, h, fine=True),
+                       lambda w, h: render_grid(w, h, 4),
+                       lambda w, h: render_grid(w, h, 8),
                        render_test_card]
 
 def _monitor_rects():
