@@ -1,18 +1,16 @@
 # Eyedim
 
-Lightweight Windows utility to control display **brightness**, **night light** and **contrast** directly from the system tray.
+Small Windows utility to control display **brightness**, **night light**, **contrast**, and **accent color** from the system tray.
 
-![Screenshot](screenshot.png)
+![Screenshot](screenshot.webp)
 
 ## Features
 
-- Brightness control for all monitors (DDC/CI + WMI)
-- Night light (warm color temperature)
-- Contrast adjustment via gamma ramp
-- System tray icon showing current brightness
-- Change brightness by scrolling the mouse wheel over the tray icon (5% per notch)
+- Brightness control across monitors (DDC/CI + WMI, with smooth transitions and tray mouse-wheel control at 5% per notch)
+- Night light (warm color temperature) and contrast adjustment via gamma ramp
+- Accent color picker for sliders and the tray icon (Excel-style spectrum, luminance wheel control, HEX input/copy/paste, screen eyedropper, and recent colors history saved in `%APPDATA%\Eyedim\config.json`)
 - "User" and "Default" preset modes
-- Display panel test from the tray menu (on all monitors at once): full-screen colours (black, white, red, green, blue, gray), three grids from coarse to very fine and a test card for checking dead pixels, backlight bleed and geometry
+- Display panel & dead pixel test from the tray menu across all monitors at once (solid black, white, red, green, blue, and gray screens, three grid densities, and a test card; temporarily uses neutral gamma for accurate inspection; click/`Space`/`→` next, right-click/`←` back, `Esc` exit)
 - Autostart with Windows
 - English / Russian interface
 
@@ -23,9 +21,9 @@ Lightweight Windows utility to control display **brightness**, **night light** a
 
 ## Download
 
-[![Download Eyedim.exe](https://img.shields.io/badge/Download-Eyedim.exe-brightgreen?style=for-the-badge&logo=windows)](https://github.com/proyarik/eyedim/releases/latest)
+[![Download eyedim.exe](https://img.shields.io/badge/Download-eyedim.exe-brightgreen?style=for-the-badge&logo=windows)](https://github.com/proyarik/eyedim/releases/latest)
 
-Latest version: **v2.1.0**
+Latest version: **v2.1.1** (standalone `.exe` is around ~19.5 MB because it bundles the Python runtime and required libraries).
 
 ## Installation
 
@@ -38,36 +36,36 @@ pip install -r requirements.txt
 ## Usage
 
 ```bash
-python Eyedim.pyw
+python eyedim.pyw
 ```
 
-(or `pythonw Eyedim.pyw` to run without a console window)
+(or `pythonw eyedim.pyw` to run without a console window)
 
-The app starts minimized in the system tray. Left-click the tray icon to open the settings popup, or hover over it and scroll the mouse wheel to change the brightness.
+The app starts in the system tray. Left-click the tray icon to open the settings popup, or hover over it and scroll the mouse wheel to adjust brightness.
 
 ## Building a standalone .exe
 
 ```bash
 pip install pyinstaller
-py -3.13 -m PyInstaller --noconsole --onefile --upx-dir=. --upx-exclude=vcruntime140.dll --icon=icon.ico eyedim.pyw
+py -3.13 -m PyInstaller --noconsole --onefile --upx-dir=. --upx-exclude=vcruntime140.dll eyedim.pyw
 ```
 
 > **Note:** The build was tested with **Python 3.13** and **[UPX 5.2.1](https://github.com/upx/upx/releases/tag/v5.2.1)**.
 >
-> UPX is used to compress the resulting `.exe`. It is **not** bundled with the project — download it separately:
+> UPX is used to compress the resulting `.exe` (around ~19.5 MB with bundled dependencies). It is **not** bundled with the project — download it separately:
 >
 > 1. Go to the [UPX releases page](https://github.com/upx/upx/releases).
 > 2. Download `upx-5.2.1-win64.zip`.
-> 3. Extract `upx.exe` into the project folder (the same directory as `Eyedim.pyw`).
+> 3. Extract `upx.exe` into the project folder (the same directory as `eyedim.pyw`).
 > 4. Run the build command above.
 >
-> If you don't want to use UPX at all, simply remove the `--upx-dir=.` and `--upx-exclude=vcruntime140.dll` flags. The build will still succeed, just produce a larger `.exe`.
+> If you don't want to use UPX at all, simply remove `--upx-dir=.` and `--upx-exclude=vcruntime140.dll`. The build will still succeed, producing a larger `.exe`.
 
 ## ⚠️ Note on antivirus
 
 The pre-built `.exe` was compressed with UPX. Some antivirus software may falsely flag it as suspicious. If this happens, either:
 
-- add `Eyedim.exe` to your antivirus exclusions, or
+- add `eyedim.exe` to your antivirus exclusions, or
 - build from source using the instructions above.
 
 The source code is fully open and available in this repository.
