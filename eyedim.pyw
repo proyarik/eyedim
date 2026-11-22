@@ -1,6 +1,7 @@
 import pystray
 from PIL import Image, ImageDraw, ImageFont
 import tkinter as tk
+import tkinter.font as tkfont
 import screen_brightness_control as sbc
 import win32gui
 import win32api
@@ -16,31 +17,56 @@ import urllib.request
 import urllib.parse
 import io
 import json
+import re
 import time
 import functools
 from array import array
 
 # --- SYSTEM CONSTANTS ---
 DWMWA_WINDOW_CORNER_PREFERENCE = 33
-APP_VERSION = "v2.1.0"
+DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = -4
+
+# --- DPI / CLEARTYPE (process level, must run before Tk) ---
+def _enable_process_dpi_awareness():
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+        return
+    except Exception:
+        pass
+    try:
+        ctypes.windll.user32.SetProcessDPIAware()
+    except Exception:
+        pass
+
+_enable_process_dpi_awareness()
+
+try:
+    ctypes.windll.user32.SetThreadDpiAwarenessContext.restype = ctypes.c_void_p
+    ctypes.windll.user32.SetThreadDpiAwarenessContext.argtypes = [ctypes.c_void_p]
+    ctypes.windll.user32.SetThreadDpiAwarenessContext(
+        ctypes.c_void_p(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2))
+except Exception:
+    pass
+
+APP_VERSION = "v2.1.1"
 DONATE_URL = "https://your-donation-link.com"
 
-# --- DEFAULTS / LOOK (kept in sync with the web page demo) ---
-DEFAULT_PRESET = (80, 10, 50)      # brightness, night light, contrast
+# --- DEFAULTS / LOOK ---
+DEFAULT_PRESET = (80, 10, 50)
 PANEL_BG = "#f4f4f6"
-ACCENT = "#d98a12"                 # slider colour
+DEFAULT_ACCENT = "#d98a12"
+ACCENT = DEFAULT_ACCENT
 SUN_COLOR = "#f2a93b"
 MOON_COLOR = "#2f5fd0"
 BTN_BG = "#dcdce0"
 BTN_BG_HOVER = "#d0d0d6"
 TEXT_COLOR = "#222222"
-POPUP_W, POPUP_H = 280, 138        # settings window size
+POPUP_W, POPUP_H = 316, 138
+COLOR_HISTORY_MAX = 7
 
-# --- GAMMA SAFETY LIMITS ---
 GAMMA_GREEN_MIN = 0.70
 GAMMA_BLUE_MIN = 0.55
 
-# --- LOCALIZATION ---
 LANG = "en"
 
 TRANSLATIONS = {
@@ -49,11 +75,16 @@ TRANSLATIONS = {
         "menu_about": "About Eyedim",
         "menu_panel_test": "Test Display Panel",
         "menu_autostart": "Run at Windows Startup",
-        "menu_lang": "Language: English",
+        "menu_lang": "Language: English → Русский",
         "menu_exit": "Exit",
         "mode_user": "Mode: User",
         "mode_default": "Mode: Default",
         "window_title": "Eyedim - Display Settings",
+        "color_dialog_title": "Eyedim — Color",
+        "color_recent": "Recent colors",
+        "color_apply": "Apply",
+        "color_eyedropper": "Pick color from screen",
+        "color_cancel": "Cancel",
         "about_title": "About Eyedim",
         "about_desc": "Lightweight utility to control display brightness, night light, and contrast.",
         "about_author": "Developer: proyarik\nCreated with AI assistance.",
@@ -70,11 +101,16 @@ TRANSLATIONS = {
         "menu_about": "О программе Eyedim",
         "menu_panel_test": "Проверка матрицы",
         "menu_autostart": "Запускать при старте Windows",
-        "menu_lang": "Язык: Русский",
+        "menu_lang": "Язык: Русский → English",
         "menu_exit": "Выход",
         "mode_user": "Режим: Пользователь",
         "mode_default": "Режим: По умолчанию",
         "window_title": "Eyedim - Настройки дисплея",
+        "color_dialog_title": "Eyedim — Цвет",
+        "color_recent": "Недавние цвета",
+        "color_apply": "Применить",
+        "color_eyedropper": "Взять цвет с экрана",
+        "color_cancel": "Отмена",
         "about_title": "О программе Eyedim",
         "about_desc": "Легковесная утилита для управления яркостью, ночным светом и контрастом.",
         "about_author": "Разработчик: proyarik\nСоздано при содействии ИИ.",
@@ -91,7 +127,80 @@ TRANSLATIONS = {
 def t(key):
     return TRANSLATIONS[LANG].get(key, key)
 
-# --- SETTINGS FILE ---
+def _normalize_hex_color(val, fallback=DEFAULT_ACCENT):
+    if isinstance(val, str):
+        s = val.strip()
+        if len(s) == 7 and s.startswith("#"):
+            try:
+                int(s[1:], 16)
+                return s.lower()
+            except ValueError:
+                pass
+    return fallback
+
+def _hex_to_rgb(hex_color):
+    h = _normalize_hex_color(hex_color).lstrip("#")
+    return (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
+
+def _rgb_to_hex(r, g, b):
+    return "#{:02x}{:02x}{:02x}".format(
+        max(0, min(255, int(round(r)))),
+        max(0, min(255, int(round(g)))),
+        max(0, min(255, int(round(b)))),
+    )
+
+def _hsv_to_rgb(h, s, v):
+    h = h % 360.0
+    s = max(0.0, min(1.0, s))
+    v = max(0.0, min(1.0, v))
+    c = v * s
+    x = c * (1.0 - abs((h / 60.0) % 2.0 - 1.0))
+    m = v - c
+    if h < 60:
+        rp, gp, bp = c, x, 0.0
+    elif h < 120:
+        rp, gp, bp = x, c, 0.0
+    elif h < 180:
+        rp, gp, bp = 0.0, c, x
+    elif h < 240:
+        rp, gp, bp = 0.0, x, c
+    elif h < 300:
+        rp, gp, bp = x, 0.0, c
+    else:
+        rp, gp, bp = c, 0.0, x
+    return ((rp + m) * 255.0, (gp + m) * 255.0, (bp + m) * 255.0)
+
+def _rgb_to_hsv(r, g, b):
+    rn, gn, bn = r / 255.0, g / 255.0, b / 255.0
+    mx = max(rn, gn, bn)
+    mn = min(rn, gn, bn)
+    diff = mx - mn
+    if diff == 0:
+        h = 0.0
+    elif mx == rn:
+        h = (60.0 * ((gn - bn) / diff) + 360.0) % 360.0
+    elif mx == gn:
+        h = (60.0 * ((bn - rn) / diff) + 120.0) % 360.0
+    else:
+        h = (60.0 * ((rn - gn) / diff) + 240.0) % 360.0
+    s = 0.0 if mx == 0 else diff / mx
+    return (h, s, mx)
+
+def _sanitize_history(raw_list, current_col):
+    out = []
+    seen = set()
+    candidates = [current_col, DEFAULT_ACCENT]
+    if isinstance(raw_list, list):
+        candidates.extend(raw_list)
+    for item in candidates:
+        norm = _normalize_hex_color(item, "")
+        if norm and norm not in seen:
+            seen.add(norm)
+            out.append(norm)
+        if len(out) >= COLOR_HISTORY_MAX:
+            break
+    return out
+
 CONFIG_DIR = os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~"), "Eyedim")
 CONFIG_PATH = os.path.join(CONFIG_DIR, "config.json")
 _config_lock = threading.Lock()
@@ -124,13 +233,15 @@ def read_all_brightness():
     except Exception:
         return []
 
-# --- INITIAL STATE (from settings file; first run = Default mode 80/10/50) ---
 _cfg = load_config()
 _first_run = _cfg is None
 if _first_run:
     _cfg = {}
 
 LANG = _cfg.get("lang") if _cfg.get("lang") in TRANSLATIONS else detect_system_language()
+accent_color = _normalize_hex_color(_cfg.get("accent_color"), DEFAULT_ACCENT)
+ACCENT = accent_color
+color_history = _sanitize_history(_cfg.get("color_history"), accent_color)
 
 _user = _cfg.get("user")
 if not (isinstance(_user, (list, tuple)) and len(_user) == 3):
@@ -139,11 +250,9 @@ saved_brightness, saved_night_light, saved_contrast = (
     _clamp(v, d) for v, d in zip(_user, DEFAULT_PRESET))
 
 preset_active = True if _first_run else (_cfg.get("mode", "default") != "user")
-# Contrast slider is hidden by default; the user can switch it on in the window.
 show_contrast = bool(_cfg.get("show_contrast", False))
 
 def effective_contrast():
-    """Hidden contrast slider = neutral effect; the value itself is remembered."""
     return current_contrast if show_contrast else 50
 
 def popup_height():
@@ -155,8 +264,6 @@ else:
     current_night_light = saved_night_light
     current_contrast = saved_contrast
 
-# Brightness the monitors had BEFORE Eyedim touched them. If the previous
-# session did not exit cleanly, the stored value is still the true original.
 _orig = _cfg.get("original_brightness")
 if _first_run or _cfg.get("clean_exit", True) or not isinstance(_orig, list) or not _orig:
     original_brightness = read_all_brightness()
@@ -165,6 +272,9 @@ else:
 
 _reapply_timer = None
 mode_btn_redraw_ref = None
+palette_btn_redraw_ref = None
+color_picker_window = None
+_picking_color = False
 
 def save_config(clean_exit=False):
     if _exiting and not clean_exit:
@@ -173,6 +283,8 @@ def save_config(clean_exit=False):
         "mode": "default" if preset_active else "user",
         "user": [saved_brightness, saved_night_light, saved_contrast],
         "lang": LANG,
+        "accent_color": accent_color,
+        "color_history": color_history,
         "show_contrast": show_contrast,
         "original_brightness": original_brightness,
         "clean_exit": clean_exit,
@@ -191,7 +303,6 @@ SAVE_DELAY = 0.5
 _save_requested = threading.Event()
 
 def _save_worker():
-    # Debounced writer: saves once the settings have been quiet for SAVE_DELAY.
     while True:
         _save_requested.wait()
         while True:
@@ -208,7 +319,7 @@ def schedule_save():
 
 popup_window = None
 about_window = None
-panel_test_windows = []                # one full-screen window per monitor
+panel_test_windows = []
 tray_icon_ref = None
 brightness_slider_ref = None
 night_slider_ref = None
@@ -220,14 +331,33 @@ contrast_label_ref = None
 startup_registry_key = r"Software\Microsoft\Windows\CurrentVersion\Run"
 app_name = "Eyedim"
 
-# --- TK ROOT IN ITS OWN THREAD ---
 root_window = None
 _root_ready = threading.Event()
 
 def tk_thread_main():
     global root_window
+    try:
+        ctypes.windll.user32.SetThreadDpiAwarenessContext.restype = ctypes.c_void_p
+        ctypes.windll.user32.SetThreadDpiAwarenessContext.argtypes = [ctypes.c_void_p]
+        ctypes.windll.user32.SetThreadDpiAwarenessContext(
+            ctypes.c_void_p(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2))
+    except Exception:
+        pass
+
     root_window = tk.Tk()
     root_window.withdraw()
+
+    try:
+        for name in ("TkDefaultFont", "TkTextFont", "TkMenuFont", "TkHeadingFont",
+                     "TkCaptionFont", "TkSmallCaptionFont", "TkIconFont", "TkTooltipFont"):
+            try:
+                f = tkfont.nametofont(name)
+                f.configure(family="Segoe UI", size=9)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
     _root_ready.set()
     root_window.mainloop()
 
@@ -239,7 +369,12 @@ def ui_call(fn, *args, **kwargs):
         return
     root_window.after(0, lambda: fn(*args, **kwargs))
 
-# --- AUTOSTART ---
+def _ui_scale():
+    try:
+        return max(1.0, root_window.winfo_fpixels("1i") / 96.0)
+    except Exception:
+        return 1.0
+
 def is_autostart_enabled():
     try:
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, startup_registry_key, 0,
@@ -276,27 +411,30 @@ def toggle_language(icon, item):
 def rebuild_open_windows():
     popup_was_open = popup_window is not None
     about_was_open = about_window is not None
+    picker_was_open = color_picker_window is not None
 
+    close_color_picker()
     close_popup()
     close_about()
 
-    if popup_was_open:
-        _show_popup_ui()
     if about_was_open:
         _show_about_ui()
+    if popup_was_open:
+        _show_popup_ui()
+    if picker_was_open:
+        _show_color_picker_ui()
 
-_tray_last_icon_value = None
+_tray_last_icon_key = None
 _tray_last_title = None
 
 def update_tray_icon():
-    global _tray_last_icon_value, _tray_last_title
+    global _tray_last_icon_key, _tray_last_title
     if not tray_icon_ref:
         return
-    # Rendering the PIL image and swapping the Windows icon is the expensive
-    # part, so skip it (and the tooltip) when nothing visible has changed.
-    if current_brightness != _tray_last_icon_value:
+    icon_key = (current_brightness, accent_color)
+    if icon_key != _tray_last_icon_key:
         tray_icon_ref.icon = create_text_icon(current_brightness)
-        _tray_last_icon_value = current_brightness
+        _tray_last_icon_key = icon_key
     if show_contrast:
         title = TRANSLATIONS[LANG]["tooltip_format"].format(
             current_brightness, current_night_light, current_contrast)
@@ -306,6 +444,34 @@ def update_tray_icon():
     if title != _tray_last_title:
         tray_icon_ref.title = title
         _tray_last_title = title
+
+def _push_color_to_history(hex_color):
+    global color_history
+    norm = _normalize_hex_color(hex_color, "")
+    if not norm:
+        return
+    updated = [norm] + [c for c in color_history if c != norm]
+    color_history = updated[:COLOR_HISTORY_MAX]
+
+def set_accent_color(new_hex, record_history=True, persist=True):
+    global accent_color, ACCENT
+    normalized = _normalize_hex_color(new_hex, "")
+    if not normalized:
+        return
+    changed = normalized != accent_color
+    accent_color = normalized
+    ACCENT = normalized
+    if record_history:
+        _push_color_to_history(normalized)
+    if changed or record_history:
+        update_tray_icon()
+        for sl in (brightness_slider_ref, night_slider_ref, contrast_slider_ref):
+            if sl is not None:
+                sl.draw()
+        if palette_btn_redraw_ref:
+            palette_btn_redraw_ref()
+        if persist:
+            schedule_save()
 
 def update_popup_labels_and_sliders():
     global brightness_slider_ref, night_slider_ref, contrast_slider_ref
@@ -325,11 +491,11 @@ def update_popup_labels_and_sliders():
         contrast_label_ref.config(text=f"{current_contrast}")
     if mode_btn_redraw_ref:
         mode_btn_redraw_ref()
+    if palette_btn_redraw_ref:
+        palette_btn_redraw_ref()
 
-# --- GAMMA RAMP ---
-@functools.lru_cache(maxsize=128)   # fades revisit the same values
+@functools.lru_cache(maxsize=128)
 def build_gamma_ramp(nl, c):
-    """256 R + 256 G + 256 B 16-bit little-endian values (1536 bytes)."""
     nl_factor = nl / 100.0
     c_factor = (c - 50) / 50.0
 
@@ -344,9 +510,9 @@ def build_gamma_ramp(nl, c):
             v = max(0, min(65535, int(32768 + (v - 32768) / 32768.0 * scale * 32768)))
         base.append(v)
 
-    ramp = array('H', base)                               # red
-    ramp.extend(min(65535, int(v * gf)) for v in base)    # green
-    ramp.extend(min(65535, int(v * bf)) for v in base)    # blue
+    ramp = array('H', base)
+    ramp.extend(min(65535, int(v * gf)) for v in base)
+    ramp.extend(min(65535, int(v * bf)) for v in base)
     if sys.byteorder != 'little':
         ramp.byteswap()
     return ramp.tobytes()
@@ -377,15 +543,9 @@ def apply_gamma_direct(nl, c):
     except Exception:
         pass
 
-# --- GAMMA WORKER (smooth transitions) ---
-# Night light / contrast changes are faded in a single worker thread: every
-# new request retargets the running fade from the value currently on screen,
-# so fast slider moves never queue up or "jump back". Values are rounded to
-# whole units and identical frames are skipped, so a full 0 -> 100 fade costs
-# at most ~25 ramp writes, and an idle app costs nothing (the thread sleeps).
-GAMMA_FADE_FULL = 0.6               # seconds for a full 0 -> 100 change
-GAMMA_FRAME = 1.0 / 40              # ~40 fps while a fade is running
-GAMMA_INSTANT_DELTA = 2             # tiny steps (slider drag) apply at once
+GAMMA_FADE_FULL = 0.6
+GAMMA_FRAME = 1.0 / 40
+GAMMA_INSTANT_DELTA = 2
 _shutting_down = threading.Event()
 
 gamma_lock = threading.Lock()
@@ -395,18 +555,17 @@ _gamma = {
     "to": (float(current_night_light), float(effective_contrast())),
     "t0": 0.0,
     "dur": 0.0,
-    "force": True,                  # first frame is always written
-    "restore_due": None,            # re-send ramp after a brightness write
+    "force": True,
+    "restore_due": None,
     "restore_last": None,
 }
 
 def _gamma_value_at(now):
-    """Value on screen at moment `now` (call with gamma_lock held)."""
     g = _gamma
     if g["dur"] <= 0 or now >= g["t0"] + g["dur"]:
         return g["to"]
     p = (now - g["t0"]) / g["dur"]
-    p = p * p * (3 - 2 * p)         # smoothstep: soft start and soft finish
+    p = p * p * (3 - 2 * p)
     (a0, b0), (a1, b1) = g["from"], g["to"]
     return a0 + (a1 - a0) * p, b0 + (b1 - b0) * p
 
@@ -430,8 +589,6 @@ def request_gamma_update(nl=None, c=None, instant=False):
     gamma_dirty.set()
 
 def gamma_target():
-    """Night light / contrast that should be on screen right now. The display
-    panel test needs true colours, so it keeps the ramp neutral while open."""
     if panel_test_windows:
         return 0, 50
     return current_night_light, effective_contrast()
@@ -441,9 +598,6 @@ def read_pending_gamma():
         return _gamma["to"]
 
 def schedule_gamma_restore(delay):
-    """Re-send the current ramp `delay` s from now (DDC writes may reset it).
-    Repeated calls keep the earliest pending restore and also guarantee one
-    after the latest call, so a long brightness fade is covered too."""
     when = time.monotonic() + delay
     with gamma_lock:
         if _gamma["restore_due"] is None:
@@ -472,7 +626,6 @@ def gamma_worker():
             apply_gamma_direct(*frame)
             last_sent = frame
 
-        # sleep until the next fade frame / pending restore, or forever if idle
         timeout = GAMMA_FRAME if fading else None
         if due is not None:
             left = max(0.0, due - time.monotonic())
@@ -482,23 +635,13 @@ def gamma_worker():
 
 threading.Thread(target=gamma_worker, daemon=True).start()
 
-# --- FAST DDC/CI WRITERS ---
-# sbc.set_brightness() re-enumerates monitors (WMI + dxva2) on every call and
-# writes the displays one after another, which is ~130 ms per step on two
-# external monitors: far too slow for a smooth fade. While fading we keep the
-# physical monitor handles open and give every monitor its own writer thread
-# that sends only the latest value (SetVCPFeature, VCP code 0x10), so the
-# monitors update in parallel at their own DDC/CI speed. Used only when every
-# display is an external DDC/CI monitor; otherwise sbc is used as before.
-# Forced writes (startup, wake, display change, retries) always go through
-# sbc and re-open the handles afterwards, since old handles may be stale.
 VCP_BRIGHTNESS = 0x10
 
 class _PHYSICAL_MONITOR(ctypes.Structure):
     _fields_ = [("handle", wintypes.HANDLE), ("description", wintypes.WCHAR * 128)]
 
 _vcp_failures = 0
-VCP_MAX_FAILURES = 2                # then stay on sbc for the rest of the session
+VCP_MAX_FAILURES = 2
 
 class _VcpWriter:
     def __init__(self, handle, on_fail):
@@ -546,7 +689,6 @@ class _VcpWriter:
                 pass
 
 def _open_vcp_writers(on_fail):
-    """Writers for all monitors, or None if the fast path can't be used."""
     if _vcp_failures >= VCP_MAX_FAILURES:
         return None
     handles = []
@@ -569,7 +711,6 @@ def _open_vcp_writers(on_fail):
                 if not dxva2.GetPhysicalMonitorsFromHMONITOR(hmon, count.value, arr):
                     raise OSError("GetPhysicalMonitorsFromHMONITOR failed")
                 handles.extend(p.handle for p in arr)
-        # pseudo/duplicate monitors would make the mapping unclear: use sbc then
         if len(handles) != len(infos):
             raise OSError("monitor count mismatch")
         return [_VcpWriter(h, on_fail) for h in handles]
@@ -585,22 +726,14 @@ def _close_vcp_writers(writers):
     for w in writers or ():
         w.close()
     for w in writers or ():
-        w.thread.join(0.3)          # let an in-flight write finish first
+        w.thread.join(0.3)
 
-# --- BRIGHTNESS WORKER (smooth transitions) ---
-# The brightness on screen follows the slider through a critically damped
-# spring: it accelerates softly, never overshoots, and when the target keeps
-# moving (slider drag) it simply keeps following without stopping or
-# restarting. The spring runs on real elapsed time and the writers always send
-# the newest value, so slow hardware gets fewer writes on the same smooth
-# curve instead of falling behind. DDC/CI monitors get a longer fade so each
-# step stays small. Forced writes (startup, wake, retries) jump directly.
 brightness_queue = queue.Queue()
-BRIGHTNESS_SPRING_DDC = 3.5         # 1/s; 0 -> 100 settles in ~1.6 s
-BRIGHTNESS_SPRING_FAST = 7.0        # laptop panels (WMI): ~0.8 s
-BRIGHTNESS_FRAME = 1.0 / 40         # spring update rate while fading
+BRIGHTNESS_SPRING_DDC = 3.5
+BRIGHTNESS_SPRING_FAST = 7.0
+BRIGHTNESS_FRAME = 1.0 / 40
 GAMMA_RESTORE_DELAY = 0.12
-MAX_BRIGHTNESS_RETRIES = 3          # quick retries: 0.5 s, 1 s, 1.5 s
+MAX_BRIGHTNESS_RETRIES = 3
 desired_brightness = current_brightness
 
 def brightness_worker():
@@ -609,14 +742,14 @@ def brightness_worker():
     fail_streak = 0
     target = None
     force = False
-    pos = vel = 0.0                 # spring state (value on screen, %/s)
+    pos = vel = 0.0
     last_t = time.monotonic()
     writers = None
     vcp_broken = threading.Event()
 
     def on_vcp_fail():
         vcp_broken.set()
-        brightness_queue.put((desired_brightness, True))   # wake + resync via sbc
+        brightness_queue.put((desired_brightness, True))
 
     def schedule_retry():
         nonlocal fail_streak
@@ -636,7 +769,6 @@ def brightness_worker():
                 target, force = item
                 pos, vel = float(max(last_applied, 0)), 0.0
                 last_t = time.monotonic()
-            # coalesce everything queued so far: only the latest target matters
             while True:
                 try:
                     nxt = brightness_queue.get_nowait()
@@ -657,7 +789,6 @@ def brightness_worker():
                 force = True
 
             if force or last_applied < 0:
-                # direct, robust write through sbc
                 _close_vcp_writers(writers)
                 writers = None
                 try:
@@ -678,7 +809,6 @@ def brightness_worker():
 
             now = time.monotonic()
             dt, last_t = now - last_t, now
-            # exact critically damped step: stable for any dt
             w = BRIGHTNESS_SPRING_DDC if writers else BRIGHTNESS_SPRING_FAST
             x = pos - target
             k = vel + w * x
@@ -693,7 +823,7 @@ def brightness_worker():
             if val != last_applied:
                 if writers:
                     for wr in writers:
-                        wr.post(val)            # non-blocking, latest value wins
+                        wr.post(val)
                     last_applied = val
                 else:
                     try:
@@ -744,13 +874,7 @@ def restore_original_brightness(timeout=3.0):
     th.start()
     th.join(timeout)
 
-# --- RE-APPLY AFTER SLEEP / DISPLAY CHANGE ---
-# Windows, the GPU driver and many monitors drop the gamma ramp (night light /
-# contrast) and sometimes the DDC/CI brightness when the screen is powered off
-# by the idle timeout, the PC wakes from sleep, or the session is unlocked.
-# None of those reliably sends WM_DISPLAYCHANGE, so we also subscribe to the
-# console display state and session lock notifications.
-REAPPLY_DELAYS = (1.5, 5.0)   # second pass catches late resets by driver/monitor
+REAPPLY_DELAYS = (1.5, 5.0)
 
 def reapply_all():
     if _shutting_down.is_set():
@@ -786,7 +910,7 @@ WTS_CONSOLE_CONNECT = 0x1
 WTS_SESSION_UNLOCK = 0x8
 NOTIFY_FOR_THIS_SESSION = 0
 DEVICE_NOTIFY_WINDOW_HANDLE = 0
-DISPLAY_STATE_ON = 1          # 0 = off, 1 = on, 2 = dimmed
+DISPLAY_STATE_ON = 1
 
 class GUID(ctypes.Structure):
     _fields_ = [("Data1", ctypes.c_uint32), ("Data2", ctypes.c_uint16),
@@ -795,7 +919,6 @@ class GUID(ctypes.Structure):
     def __eq__(self, other):
         return bytes(self) == bytes(other)
 
-# GUID_CONSOLE_DISPLAY_STATE {6FE69556-704A-47A0-8F24-C28D936FDA47}
 GUID_CONSOLE_DISPLAY_STATE = GUID(
     0x6FE69556, 0x704A, 0x47A0,
     (ctypes.c_ubyte * 8)(0x8F, 0x24, 0xC2, 0x8D, 0x93, 0x6F, 0xDA, 0x47))
@@ -818,8 +941,6 @@ def start_display_watcher():
                 state = pbs.Data
                 prev = display_state["last"]
                 display_state["last"] = state
-                # Windows sends the current state right after registering;
-                # only react to a real transition back to "on".
                 if state == DISPLAY_STATE_ON and prev is not None and prev != DISPLAY_STATE_ON:
                     schedule_reapply()
 
@@ -846,7 +967,6 @@ def start_display_watcher():
             cls = win32gui.RegisterClass(wc)
             hwnd = win32gui.CreateWindow(cls, "EyedimWatcher", 0, 0, 0, 0, 0, 0, 0, wc.hInstance, None)
 
-            # screen turned off by idle timeout and back on
             try:
                 reg = ctypes.windll.user32.RegisterPowerSettingNotification
                 reg.restype = ctypes.c_void_p
@@ -855,7 +975,6 @@ def start_display_watcher():
             except Exception as e:
                 print(f"Power setting notification error: {e}")
 
-            # lock screen -> unlock (often follows the idle screen-off)
             try:
                 ctypes.windll.wtsapi32.WTSRegisterSessionNotification(
                     wintypes.HWND(hwnd), NOTIFY_FOR_THIS_SESSION)
@@ -868,9 +987,7 @@ def start_display_watcher():
 
     threading.Thread(target=run, daemon=True).start()
 
-# --- SETTERS ---
 def _commit_user_mode():
-    """Any slider movement switches to User mode and stores the values."""
     global preset_active, saved_brightness, saved_night_light, saved_contrast
     preset_active = False
     saved_brightness = current_brightness
@@ -909,13 +1026,11 @@ def toggle_preset():
     old_brightness = current_brightness
 
     if preset_active:
-        # Default -> User: saved_* always hold the latest User values
         current_brightness = saved_brightness
         current_night_light = saved_night_light
         current_contrast = saved_contrast
         preset_active = False
     else:
-        # User -> Default
         current_brightness, current_night_light, current_contrast = DEFAULT_PRESET
         preset_active = True
 
@@ -928,7 +1043,6 @@ def toggle_preset():
     request_gamma_update(current_night_light, effective_contrast())
     schedule_save()
 
-# --- TRAY ICON ---
 _font_cache = {}
 
 def _get_font(size):
@@ -947,7 +1061,8 @@ def create_text_icon(brightness_val):
     image = Image.new('RGBA', (64, 64), (0, 0, 0, 0))
     dc = ImageDraw.Draw(image)
 
-    line_color = (255, 200, 50, 255)
+    r, g, b = _hex_to_rgb(accent_color)
+    line_color = (r, g, b, 255)
     dc.line([(2, 3), (62, 3)], fill=line_color, width=3)
     dc.line([(2, 60), (62, 60)], fill=line_color, width=3)
 
@@ -958,10 +1073,9 @@ def create_text_icon(brightness_val):
     bbox = dc.textbbox((0, 0), text, font=font)
     tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
     dc.text(((64 - tw) // 2 - bbox[0], (64 - th) // 2 - bbox[1]),
-            text, fill=(255, 200, 50), font=font)
+            text, fill=(r, g, b), font=font)
     return image
 
-# --- VECTOR ICONS ---
 def draw_vector_sun(canvas, x, y):
     r = 5
     canvas.create_oval(x - r, y - r, x + r, y + r, fill=SUN_COLOR, outline="")
@@ -972,7 +1086,6 @@ def draw_vector_sun(canvas, x, y):
         canvas.create_line(x1, y1, x2, y2, fill=SUN_COLOR, width=2, capstyle="round")
 
 def _moon_points():
-    # Crescent = big disk minus an offset disk (same geometry as the web icon).
     R, rr, ox, oy = 9.0, 9.0, 6.4, -6.4
     d = math.hypot(ox, oy)
     a = (R * R - rr * rr + d * d) / (2 * d)
@@ -1002,11 +1115,37 @@ def draw_vector_moon(canvas, x, y, bg=PANEL_BG):
         coords += [cx + px * k, cy + py * k]
     canvas.create_polygon(coords, fill=MOON_COLOR, outline="")
 
-def draw_vector_contrast(canvas, x, y):
-    r = 8
-    canvas.create_arc(x - r, y - r, x + r, y + r, start=-90, extent=180,
-                      fill="#444444", outline="", style="pieslice")
-    canvas.create_oval(x - r, y - r, x + r, y + r, outline="#444444", width=2)
+_contrast_icon_cache = {}
+
+def _render_contrast_photo(size=18, color="#444444"):
+    key = (size, color)
+    if key in _contrast_icon_cache:
+        return _contrast_icon_cache[key]
+
+    from PIL import ImageFilter, ImageTk
+    scale = 4
+    s = size * scale
+    img = Image.new("RGBA", (s, s), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+
+    r, g, b = _hex_to_rgb(color)
+    fill_col = (r, g, b, 255)
+    pad = 2 * scale
+    stroke_w = 2 * scale
+
+    d.pieslice([pad, pad, s - 1 - pad, s - 1 - pad], start=-90, end=90, fill=fill_col)
+    d.ellipse([pad, pad, s - 1 - pad, s - 1 - pad], outline=fill_col, width=stroke_w)
+
+    final_img = img.resize((size, size), Image.Resampling.LANCZOS).filter(
+        ImageFilter.UnsharpMask(radius=0.6, percent=90, threshold=2)
+    )
+    photo = ImageTk.PhotoImage(final_img)
+    _contrast_icon_cache[key] = photo
+    return photo
+
+def draw_vector_contrast(canvas, x, y, color="#444444"):
+    photo = _render_contrast_photo(18, color=color)
+    canvas.create_image(x, y, image=photo, anchor="center")
 
 def draw_vector_gear(canvas, x, y, color=MOON_COLOR):
     k = 16 / 24.0
@@ -1017,6 +1156,49 @@ def draw_vector_gear(canvas, x, y, color=MOON_COLOR):
                            x + 10 * k * math.cos(a), y + 10 * k * math.sin(a),
                            fill=color, width=1, capstyle="round")
 
+_palette_icon_cache = {}
+
+def _render_hsv_wheel_photo(size=18, ring=False):
+    key = ("ring" if ring else "wheel", size)
+    if key in _palette_icon_cache:
+        return _palette_icon_cache[key]
+
+    from PIL import ImageTk
+    scale = 4
+    s = size * scale
+    img = Image.new("RGBA", (s, s), (0, 0, 0, 0))
+    px = img.load()
+
+    cx = (s - 1) / 2.0
+    cy = (s - 1) / 2.0
+    r_max = s * 0.46
+    r_min = r_max * 0.52 if ring else 0.0
+
+    for y in range(s):
+        for x in range(s):
+            dx = x - cx
+            dy = y - cy
+            dist = math.hypot(dx, dy)
+            if dist <= r_max and (not ring or dist >= r_min):
+                ang = (math.degrees(math.atan2(dy, dx)) + 360.0) % 360.0
+                sat = 1.0 if ring else min(1.0, dist / r_max)
+                r, g, b = _hsv_to_rgb(ang, sat, 1.0)
+                alpha = 255
+                if r_max - dist < 1.5:
+                    alpha = int(255 * max(0.0, (r_max - dist) / 1.5))
+                elif ring and dist - r_min < 1.5:
+                    alpha = int(255 * max(0.0, (dist - r_min) / 1.5))
+                px[x, y] = (int(r), int(g), int(b), alpha)
+
+    final_img = img.resize((size, size), Image.Resampling.LANCZOS)
+    photo = ImageTk.PhotoImage(final_img)
+    _palette_icon_cache[key] = photo
+    return photo
+
+def draw_vector_palette(canvas, x, y, dot_color=DEFAULT_ACCENT):
+    photo = _render_hsv_wheel_photo(18, ring=False)
+    canvas.create_image(x, y, image=photo, anchor="center")
+
 def draw_round_rect(canvas, w, h, color, radius=6):
     d = radius * 2
     canvas.create_arc(0, 0, d, d, start=90, extent=90, fill=color, outline="")
@@ -1026,11 +1208,134 @@ def draw_round_rect(canvas, w, h, color, radius=6):
     canvas.create_rectangle(radius, 0, w - radius, h, fill=color, outline="")
     canvas.create_rectangle(0, radius, w, h - radius, fill=color, outline="")
 
-# --- WINDOW CLOSE HELPERS ---
+_eyedropper_icon_cache = {}
+
+def _render_eyedropper_photo(size=22, color="#444444"):
+    key = (size, color)
+    if key in _eyedropper_icon_cache:
+        return _eyedropper_icon_cache[key]
+
+    from PIL import ImageTk
+    scale = 4
+    s = size * scale
+    img = Image.new("RGBA", (s, s), (0, 0, 0, 0))
+    px = img.load()
+
+    cx = s * 0.45
+    cy = s * 0.54
+    r_out = s * 0.39
+    r_in = r_out * 0.56
+
+    for y in range(s):
+        for x in range(s):
+            dx = x - cx
+            dy = y - cy
+            dist = math.hypot(dx, dy)
+            if r_in - 1.5 <= dist <= r_out + 1.5:
+                ang = (math.degrees(math.atan2(dy, dx)) + 360.0) % 360.0
+                r, g, b = _hsv_to_rgb(ang, 0.92, 0.98)
+                a_out = min(1.0, max(0.0, (r_out + 1.2 - dist) / 2.2))
+                a_in = min(1.0, max(0.0, (dist - (r_in - 1.2)) / 2.2))
+                alpha = int(255 * min(a_out, a_in))
+                if alpha > 0:
+                    px[x, y] = (int(r), int(g), int(b), alpha)
+
+    pip = Image.new("RGBA", (s, s), (0, 0, 0, 0))
+    d = ImageDraw.Draw(pip)
+    white = (255, 255, 255, 255)
+    subtle_edge = (90, 90, 98, 210)
+    ar, ag, ab = _hex_to_rgb(color)
+    acc = (ar, ag, ab, 255)
+
+    inv_s2 = 0.70710678
+    ox, oy = s * 0.78, s * 0.22
+
+    def pt_uv(u, v):
+        return (ox + (-u + v) * inv_s2, oy + (u + v) * inv_s2)
+
+    def poly_uv(uv_list, fill, outline=None):
+        d.polygon([pt_uv(u, v) for u, v in uv_list], fill=fill, outline=outline)
+
+    rb = s * 0.095
+    d.ellipse([ox - rb, oy - rb, ox + rb, oy + rb], fill=white, outline=subtle_edge, width=2)
+    cw = s * 0.145
+    ch = s * 0.048
+    poly_uv([(s * 0.065, -cw), (s * 0.065, cw), (s * 0.065 + ch, cw), (s * 0.065 + ch, -cw)],
+            fill=white, outline=subtle_edge)
+    bw = s * 0.072
+    nw = s * 0.032
+    poly_uv([
+        (s * 0.09, -bw), (s * 0.09, bw),
+        (s * 0.34, bw), (s * 0.42, nw),
+        (s * 0.49, nw), (s * 0.49, -nw),
+        (s * 0.42, -nw), (s * 0.34, -bw)
+    ], fill=white, outline=subtle_edge)
+    tx, ty = pt_uv(s * 0.49, 0)
+    d.ellipse([tx - nw, ty - nw, tx + nw, ty + nw], fill=white)
+
+    iw = s * 0.042
+    poly_uv([
+        (s * 0.125, -iw), (s * 0.125, iw),
+        (s * 0.275, iw), (s * 0.255, -iw)
+    ], fill=acc)
+
+    combined = Image.alpha_composite(img, pip)
+    final_img = combined.resize((size, size), Image.Resampling.LANCZOS)
+    photo = ImageTk.PhotoImage(final_img)
+    _eyedropper_icon_cache[key] = photo
+    return photo
+
+def draw_vector_eyedropper(canvas, x, y, color=DEFAULT_ACCENT):
+    photo = _render_eyedropper_photo(22, color=color)
+    canvas.create_image(x, y, image=photo, anchor="center")
+
+def _sample_cursor_rgb():
+    user32 = ctypes.windll.user32
+    gdi32 = ctypes.windll.gdi32
+    pt = wintypes.POINT()
+    if not user32.GetCursorPos(ctypes.byref(pt)):
+        return None
+    hdc = user32.GetDC(None)
+    if not hdc:
+        return None
+    try:
+        colorref = gdi32.GetPixel(hdc, pt.x, pt.y)
+        if colorref == 0xFFFFFFFF:
+            return None
+        return (colorref & 0xFF, (colorref >> 8) & 0xFF, (colorref >> 16) & 0xFF)
+    finally:
+        user32.ReleaseDC(None, hdc)
+
+def _extract_hex_code(raw_text):
+    if not raw_text:
+        return ""
+    m = re.search(r"#?([0-9a-fA-F]{6})", str(raw_text).strip())
+    if not m:
+        return ""
+    return ("#" + m.group(1)).lower()
+
+def close_color_picker():
+    global color_picker_window, _picking_color
+    _picking_color = False
+    win = color_picker_window
+    color_picker_window = None
+    if win:
+        try:
+            win.attributes("-alpha", 1.0)
+        except Exception:
+            pass
+        try:
+            win.destroy()
+        except Exception:
+            pass
+
 def close_popup():
     global popup_window, brightness_slider_ref, night_slider_ref, contrast_slider_ref
-    global brightness_label_ref, night_label_ref, contrast_label_ref, mode_btn_redraw_ref
+    global brightness_label_ref, night_label_ref, contrast_label_ref
+    global mode_btn_redraw_ref, palette_btn_redraw_ref
+    close_color_picker()
     mode_btn_redraw_ref = None
+    palette_btn_redraw_ref = None
     brightness_slider_ref = None
     night_slider_ref = None
     contrast_slider_ref = None
@@ -1053,7 +1358,561 @@ def close_about():
             pass
         about_window = None
 
-# --- ABOUT WINDOW ---
+_spectrum_photo_cache = {}
+
+def _build_excel_spectrum_image(w, h, lum=1.0):
+    lum_q = int(round(max(0.1, min(1.0, lum)) * 100))
+    key = ("excel_sv", w, h, lum_q)
+    if key in _spectrum_photo_cache:
+        return _spectrum_photo_cache[key]
+    img = Image.new("RGB", (w, h))
+    px = img.load()
+    lum_f = lum_q / 100.0
+    for y in range(h):
+        t_y = y / max(1, h - 1)
+        sat = max(0.08, 1.0 - 0.92 * (t_y ** 1.25))
+        val = max(0.22, (1.0 - 0.55 * (t_y ** 1.15)) * lum_f)
+        for x in range(w):
+            hue = (x / max(1, w - 1)) * 359.0
+            r, g, b = _hsv_to_rgb(hue, sat, val)
+            px[x, y] = (int(round(r)), int(round(g)), int(round(b)))
+    _spectrum_photo_cache[key] = img
+    return img
+
+def _build_lum_bar_image(w, h, hue_deg, sat):
+    key = ("excel_lum", w, h, int(round(hue_deg)) % 360, int(round(sat * 100)))
+    if key in _spectrum_photo_cache:
+        return _spectrum_photo_cache[key]
+    img = Image.new("RGB", (w, h))
+    px = img.load()
+    h_deg = key[3]
+    s_f = key[4] / 100.0
+    for y in range(h):
+        v = 1.0 - 0.88 * (y / max(1, h - 1))
+        r, g, b = _hsv_to_rgb(h_deg, s_f, v)
+        row_col = (int(round(r)), int(round(g)), int(round(b)))
+        for x in range(w):
+            px[x, y] = row_col
+    _spectrum_photo_cache[key] = img
+    return img
+
+def open_color_picker():
+    ui_call(_show_color_picker_ui)
+
+def _show_color_picker_ui():
+    global color_picker_window, _picking_color
+    if color_picker_window is not None:
+        try:
+            color_picker_window.focus_force()
+            return
+        except Exception:
+            color_picker_window = None
+
+    _picking_color = True
+    prev_accent = accent_color
+    init_r, init_g, init_b = _hex_to_rgb(accent_color)
+    h0, s0, v0 = _rgb_to_hsv(init_r, init_g, init_b)
+    state = {
+        "hue": h0 if (s0 > 0.02 and v0 > 0.02) else 32.0,
+        "sat": max(0.08, min(1.0, s0 if s0 > 0.02 else 0.9)),
+        "val": max(0.22, min(1.0, v0 if v0 > 0.02 else 0.85)),
+        "lum": 1.0,
+        "hex": accent_color,
+        "sampling": False,
+        "wait_release": False,
+        "sample_job": None,
+        "sample_prev_hex": accent_color,
+    }
+
+    scale = _ui_scale()
+    spec_w = int(264 * scale)
+    spec_h = int(136 * scale)
+    lum_w = int(18 * scale)
+    swatch_sz = int(76 * scale)
+    ctrl_h = int(30 * scale)
+
+    root_window.update_idletasks()
+    win = tk.Toplevel(root_window)
+    color_picker_window = win
+    win.withdraw()
+    win.title(t("color_dialog_title"))
+    win.minsize(int(310 * scale), 1)
+    win.attributes("-topmost", True)
+    win.resizable(False, False)
+    win.configure(bg=PANEL_BG)
+
+    win.update_idletasks()
+    try:
+        hwnd = ctypes.windll.user32.GetParent(win.winfo_id())
+        if not hwnd:
+            hwnd = win.winfo_id()
+        ctypes.windll.dwmapi.DwmSetWindowAttribute(
+            hwnd, DWMWA_WINDOW_CORNER_PREFERENCE,
+            ctypes.byref(ctypes.c_int(2)), ctypes.sizeof(ctypes.c_int))
+    except Exception:
+        pass
+
+    outer = tk.Frame(win, padx=int(12 * scale), pady=int(12 * scale), bg=PANEL_BG)
+    outer.pack(fill=tk.BOTH, expand=True)
+
+    top_row = tk.Frame(outer, bg=PANEL_BG)
+    top_row.pack(anchor="w")
+
+    spec_canvas = tk.Canvas(top_row, width=spec_w, height=spec_h,
+                           highlightthickness=1, highlightbackground="#c4c4cc",
+                           bg=PANEL_BG, cursor="crosshair")
+    spec_canvas.pack(side=tk.LEFT)
+
+    lum_canvas = tk.Canvas(top_row, width=lum_w, height=spec_h,
+                          highlightthickness=1, highlightbackground="#c4c4cc",
+                          bg=PANEL_BG, cursor="hand2")
+    lum_canvas.pack(side=tk.LEFT, padx=(int(8 * scale), 0))
+
+    from PIL import ImageTk
+    imgs = {"spec": None, "spec_key": None, "lum": None, "lum_key": None}
+
+    def current_hex():
+        r, g, b = _hsv_to_rgb(state["hue"], state["sat"], state["val"] * state["lum"])
+        return _rgb_to_hex(r, g, b)
+
+    def render_spectrum():
+        lum_q = int(round(state["lum"] * 100))
+        k = (spec_w, spec_h, lum_q)
+        if imgs["spec_key"] != k or imgs["spec"] is None:
+            pil_s = _build_excel_spectrum_image(spec_w, spec_h, state["lum"])
+            imgs["spec"] = ImageTk.PhotoImage(pil_s, master=spec_canvas)
+            imgs["spec_key"] = k
+        spec_canvas.delete("all")
+        spec_canvas.create_image(0, 0, image=imgs["spec"], anchor="nw")
+
+        cx = (state["hue"] % 360.0) / 359.0 * (spec_w - 1)
+        t_y = ((1.0 - state["sat"]) / 0.92) ** (1.0 / 1.25)
+        cy = max(0.0, min(float(spec_h - 1), t_y * (spec_h - 1)))
+        spec_canvas.create_line(cx - 7, cy, cx - 2, cy, fill="#ffffff", width=2)
+        spec_canvas.create_line(cx + 2, cy, cx + 7, cy, fill="#ffffff", width=2)
+        spec_canvas.create_line(cx, cy - 7, cx, cy - 2, fill="#ffffff", width=2)
+        spec_canvas.create_line(cx, cy + 2, cx, cy + 7, fill="#ffffff", width=2)
+        spec_canvas.create_line(cx - 6, cy, cx - 2, cy, fill="#111111", width=1)
+        spec_canvas.create_line(cx + 2, cy, cx + 6, cy, fill="#111111", width=1)
+        spec_canvas.create_line(cx, cy - 6, cx, cy - 2, fill="#111111", width=1)
+        spec_canvas.create_line(cx, cy + 2, cx, cy + 6, fill="#111111", width=1)
+
+    def render_lum():
+        lk = (lum_w, spec_h, int(round(state["hue"])) % 360, int(round(state["sat"] * 100)))
+        if imgs["lum_key"] != lk or imgs["lum"] is None:
+            pil_l = _build_lum_bar_image(lum_w, spec_h, state["hue"], state["sat"])
+            imgs["lum"] = ImageTk.PhotoImage(pil_l, master=lum_canvas)
+            imgs["lum_key"] = lk
+        lum_canvas.delete("all")
+        lum_canvas.create_image(0, 0, image=imgs["lum"], anchor="nw")
+        ly = (1.0 - state["lum"]) / 0.88 * (spec_h - 1)
+        ly = max(1.0, min(float(spec_h - 2), ly))
+        lum_canvas.create_rectangle(0, ly - 2, lum_w - 1, ly + 2,
+                                    outline="#18181b", fill="#ffffff", width=1)
+
+    def apply_hsv_from_hex(norm_hex):
+        r, g, b = _hex_to_rgb(norm_hex)
+        h, sat_v, v_v = _rgb_to_hsv(r, g, b)
+        if sat_v > 0.02 and v_v > 0.02:
+            state["hue"] = h
+        state["sat"] = max(0.08, min(1.0, sat_v))
+        if v_v >= 0.22:
+            state["val"] = min(1.0, v_v)
+            state["lum"] = 1.0
+        else:
+            state["val"] = 0.22
+            state["lum"] = max(0.12, v_v / 0.22)
+        render_lum()
+        render_spectrum()
+
+    def on_spec_event(event):
+        x = max(0.0, min(float(spec_w - 1), float(event.x)))
+        y = max(0.0, min(float(spec_h - 1), float(event.y)))
+        state["hue"] = (x / max(1, spec_w - 1)) * 359.0
+        ty = y / max(1, spec_h - 1)
+        state["sat"] = max(0.08, min(1.0, 1.0 - 0.92 * (ty ** 1.25)))
+        state["val"] = max(0.22, min(1.0, 1.0 - 0.55 * (ty ** 1.15)))
+        render_spectrum()
+        render_lum()
+        update_live_preview(current_hex())
+
+    def on_lum_event(event):
+        y = max(0.0, min(float(spec_h - 1), float(event.y)))
+        state["lum"] = max(0.12, min(1.0, 1.0 - 0.88 * (y / max(1, spec_h - 1))))
+        render_lum()
+        render_spectrum()
+        update_live_preview(current_hex())
+
+    def on_lum_wheel(event):
+        raw_delta = getattr(event, "delta", 0)
+        if raw_delta:
+            notches = raw_delta / 120.0
+        else:
+            notches = 1.0 if getattr(event, "num", 0) == 4 else -1.0
+        state["lum"] = max(0.12, min(1.0, state["lum"] + notches * 0.015))
+        render_lum()
+        render_spectrum()
+        update_live_preview(current_hex())
+
+    spec_canvas.bind("<Button-1>", on_spec_event)
+    spec_canvas.bind("<B1-Motion>", on_spec_event)
+    lum_canvas.bind("<Button-1>", on_lum_event)
+    lum_canvas.bind("<B1-Motion>", on_lum_event)
+    lum_canvas.bind("<MouseWheel>", on_lum_wheel)
+    lum_canvas.bind("<Button-4>", on_lum_wheel)
+    lum_canvas.bind("<Button-5>", on_lum_wheel)
+
+    bottom_section = tk.Frame(outer, bg=PANEL_BG)
+    bottom_section.pack(fill=tk.X, pady=(int(10 * scale), 0))
+
+    swatch_canvas = tk.Canvas(bottom_section, width=swatch_sz, height=swatch_sz,
+                              bg=PANEL_BG, highlightthickness=0)
+    swatch_canvas.pack(side=tk.LEFT, anchor="s")
+
+    right_col = tk.Frame(bottom_section, bg=PANEL_BG)
+    right_col.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(int(10 * scale), 0))
+
+    tk.Label(right_col, text=t("color_recent"), font=("Segoe UI", 8),
+             fg="#555555", bg=PANEL_BG).pack(anchor="w", pady=(0, int(4 * scale)))
+
+    history_frame = tk.Frame(right_col, bg=PANEL_BG)
+    history_frame.pack(anchor="w")
+
+    def select_history_color(col):
+        norm = _normalize_hex_color(col, DEFAULT_ACCENT)
+        apply_hsv_from_hex(norm)
+        update_live_preview(norm)
+
+    for col in color_history[:COLOR_HISTORY_MAX]:
+        sw = tk.Canvas(history_frame, width=int(21 * scale), height=int(21 * scale),
+                       bg=PANEL_BG, highlightthickness=0, cursor="hand2")
+        sw.pack(side=tk.LEFT, padx=(0, int(4 * scale)))
+        sw.create_rectangle(0, 0, int(20 * scale), int(20 * scale), fill=col,
+                            outline="#222222" if col == state["hex"] else "#b8b8c0", width=1)
+        sw.bind("<Button-1>", lambda e, c=col: select_history_color(c))
+
+    controls_row = tk.Frame(right_col, bg=PANEL_BG)
+    controls_row.pack(fill=tk.X, pady=(int(8 * scale), 0))
+
+    hex_var = tk.StringVar(value=state["hex"].upper())
+    _updating_hex_entry = False
+
+    def _set_entry_text(txt):
+        nonlocal _updating_hex_entry
+        _updating_hex_entry = True
+        try:
+            hex_var.set(txt)
+        finally:
+            _updating_hex_entry = False
+
+    def _paint_swatch(hex_col):
+        swatch_canvas.delete("all")
+        swatch_canvas.create_rectangle(0, 0, swatch_sz - 1, swatch_sz - 1,
+                                       fill=hex_col, outline="#9e9ea6", width=1)
+
+    def sync_from_hex_string(raw_text, apply_preview=True):
+        extracted = _extract_hex_code(raw_text)
+        if not extracted:
+            return False
+        apply_hsv_from_hex(extracted)
+        if apply_preview:
+            update_live_preview(extracted, sync_entry=False)
+        else:
+            state["hex"] = extracted
+            _paint_swatch(extracted)
+        return True
+
+    def on_hex_var_change(*args):
+        if _updating_hex_entry:
+            return
+        extracted = _extract_hex_code(hex_var.get())
+        if extracted:
+            sync_from_hex_string(extracted, apply_preview=True)
+
+    hex_var.trace_add("write", on_hex_var_change)
+
+    hex_border = tk.Frame(controls_row, bg="#c4c4cc", padx=1, pady=1,
+                          width=int(78 * scale), height=ctrl_h)
+    hex_border.pack(side=tk.LEFT)
+    hex_border.pack_propagate(False)
+
+    hex_entry = tk.Entry(
+        hex_border,
+        textvariable=hex_var,
+        font=("Segoe UI", 8),
+        fg="#333333",
+        bg="#ffffff",
+        readonlybackground="#ffffff",
+        relief="flat",
+        bd=0,
+        justify="center",
+        insertbackground="#222222",
+        highlightthickness=0,
+        exportselection=True,
+    )
+    hex_entry.pack(fill=tk.BOTH, expand=True)
+
+    def do_hex_copy(event=None):
+        try:
+            if hex_entry.selection_present():
+                txt = hex_entry.selection_get()
+            else:
+                txt = hex_var.get().strip() or state["hex"].upper()
+            win.clipboard_clear()
+            win.clipboard_append(txt)
+            win.update()
+        except Exception:
+            pass
+        return "break"
+
+    def do_hex_cut(event=None):
+        do_hex_copy()
+        try:
+            if hex_entry.selection_present():
+                hex_entry.delete(tk.SEL_FIRST, tk.SEL_LAST)
+            else:
+                _set_entry_text("")
+        except Exception:
+            pass
+        return "break"
+
+    def do_hex_paste(event=None):
+        hex_entry.focus_set()
+        try:
+            clip = win.clipboard_get()
+        except Exception:
+            return "break"
+        extracted = _extract_hex_code(clip)
+        if extracted:
+            _set_entry_text(extracted.upper())
+            hex_entry.icursor(tk.END)
+            sync_from_hex_string(extracted, apply_preview=True)
+        return "break"
+
+    def do_hex_select_all(event=None):
+        hex_entry.focus_set()
+        hex_entry.select_range(0, tk.END)
+        hex_entry.icursor(tk.END)
+        return "break"
+
+    def on_hex_ctrl_key(event):
+        kc = getattr(event, "keycode", 0)
+        if kc == 67:
+            return do_hex_copy(event)
+        elif kc == 86:
+            return do_hex_paste(event)
+        elif kc == 88:
+            return do_hex_cut(event)
+        elif kc == 65:
+            return do_hex_select_all(event)
+        return None
+
+    def on_hex_click(event=None):
+        hex_entry.focus_set()
+
+    def on_hex_enter(event=None):
+        extracted = _extract_hex_code(hex_var.get())
+        if extracted:
+            _set_entry_text(extracted.upper())
+            if sync_from_hex_string(extracted, apply_preview=True):
+                apply_and_close()
+        return "break"
+
+    def on_hex_focus_out(event=None):
+        extracted = _extract_hex_code(hex_var.get())
+        if extracted:
+            _set_entry_text(extracted.upper())
+            sync_from_hex_string(extracted, apply_preview=True)
+        else:
+            _set_entry_text(state["hex"].upper())
+
+    hex_menu = tk.Menu(hex_entry, tearoff=0)
+    hex_menu.add_command(label="Копировать" if LANG == "ru" else "Copy", command=do_hex_copy)
+    hex_menu.add_command(label="Вставить" if LANG == "ru" else "Paste", command=do_hex_paste)
+    hex_menu.add_command(label="Выделить всё" if LANG == "ru" else "Select All", command=do_hex_select_all)
+
+    def show_hex_menu(event):
+        hex_entry.focus_set()
+        try:
+            hex_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            hex_menu.grab_release()
+
+    hex_entry.bind("<Button-1>", on_hex_click)
+    hex_entry.bind("<Button-3>", show_hex_menu)
+    hex_entry.bind("<Control-KeyPress>", on_hex_ctrl_key)
+    hex_entry.bind("<Shift-Insert>", do_hex_paste)
+    hex_entry.bind("<Control-Insert>", do_hex_copy)
+    hex_entry.bind("<Return>", on_hex_enter)
+    hex_entry.bind("<FocusOut>", on_hex_focus_out)
+
+    eye_canvas = tk.Canvas(controls_row, width=ctrl_h, height=ctrl_h, bg=PANEL_BG,
+                           highlightthickness=0, cursor="hand2")
+    eye_canvas.pack(side=tk.LEFT, padx=(int(6 * scale), 0))
+
+    def draw_eye_btn(hover=False):
+        eye_canvas.delete("all")
+        if state["sampling"]:
+            col = "#efd29a" if hover else "#f6dfb8"
+        else:
+            col = BTN_BG_HOVER if hover else BTN_BG
+        draw_round_rect(eye_canvas, ctrl_h, ctrl_h, col, radius=6)
+        draw_vector_eyedropper(eye_canvas, ctrl_h // 2, ctrl_h // 2, color=state["hex"])
+
+    def update_live_preview(hex_col, sync_entry=True):
+        state["hex"] = hex_col
+        set_accent_color(hex_col, record_history=False, persist=False)
+        _paint_swatch(hex_col)
+        if sync_entry:
+            _set_entry_text(hex_col.upper())
+        draw_eye_btn()
+
+    def stop_eyedropper(restore_on_cancel=False):
+        if state["sample_job"] is not None:
+            try:
+                root_window.after_cancel(state["sample_job"])
+            except Exception:
+                pass
+            state["sample_job"] = None
+        if state["sampling"]:
+            state["sampling"] = False
+            state["wait_release"] = False
+            try:
+                win.attributes("-alpha", 1.0)
+            except Exception:
+                pass
+            if popup_window is not None:
+                try:
+                    popup_window.attributes("-alpha", 1.0)
+                except Exception:
+                    pass
+            if restore_on_cancel:
+                apply_hsv_from_hex(state["sample_prev_hex"])
+                update_live_preview(state["sample_prev_hex"])
+            draw_eye_btn(False)
+
+    def _poll_eyedropper():
+        if not state["sampling"] or color_picker_window is not win:
+            return
+        l_state = ctypes.windll.user32.GetAsyncKeyState(0x01)
+        r_state = ctypes.windll.user32.GetAsyncKeyState(0x02)
+        esc_state = ctypes.windll.user32.GetAsyncKeyState(0x1B)
+        l_down = bool(l_state & 0x8000)
+        l_pressed = bool(l_state & 0x8001)
+        r_pressed = bool(r_state & 0x8001)
+        esc_pressed = bool(esc_state & 0x8001)
+
+        if state["wait_release"]:
+            if not l_down:
+                state["wait_release"] = False
+        else:
+            if esc_pressed or r_pressed:
+                stop_eyedropper(restore_on_cancel=True)
+                return
+            rgb = _sample_cursor_rgb()
+            if rgb is not None:
+                sampled_hex = _rgb_to_hex(*rgb)
+                if sampled_hex != state["hex"]:
+                    apply_hsv_from_hex(sampled_hex)
+                    update_live_preview(sampled_hex)
+            if l_pressed:
+                stop_eyedropper(restore_on_cancel=False)
+                try:
+                    win.focus_force()
+                except Exception:
+                    pass
+                return
+
+        state["sample_job"] = root_window.after(16, _poll_eyedropper)
+
+    def start_eyedropper(e=None):
+        if state["sampling"]:
+            stop_eyedropper(restore_on_cancel=True)
+            return
+        ctypes.windll.user32.GetAsyncKeyState(0x01)
+        ctypes.windll.user32.GetAsyncKeyState(0x02)
+        ctypes.windll.user32.GetAsyncKeyState(0x1B)
+        state["sample_prev_hex"] = state["hex"]
+        state["sampling"] = True
+        state["wait_release"] = True
+        draw_eye_btn(True)
+        try:
+            win.attributes("-alpha", 0.92)
+        except Exception:
+            pass
+        if popup_window is not None:
+            try:
+                popup_window.attributes("-alpha", 0.85)
+            except Exception:
+                pass
+        state["sample_job"] = root_window.after(16, _poll_eyedropper)
+
+    eye_canvas.bind("<Enter>", lambda e: draw_eye_btn(True))
+    eye_canvas.bind("<Leave>", lambda e: draw_eye_btn(False))
+    eye_canvas.bind("<Button-1>", start_eyedropper)
+
+    def dismiss_without_apply(e=None):
+        stop_eyedropper(restore_on_cancel=False)
+        set_accent_color(prev_accent, record_history=False, persist=False)
+        close_color_picker()
+        if popup_window is not None:
+            try:
+                popup_window.focus_force()
+            except Exception:
+                pass
+
+    def apply_and_close(e=None):
+        stop_eyedropper(restore_on_cancel=False)
+        set_accent_color(state["hex"], record_history=True, persist=True)
+        close_color_picker()
+        if popup_window is not None:
+            try:
+                popup_window.focus_force()
+            except Exception:
+                pass
+
+    apply_w = int(88 * scale)
+    apply_canvas = tk.Canvas(controls_row, width=apply_w, height=ctrl_h, bg=PANEL_BG,
+                             highlightthickness=0, cursor="hand2")
+    apply_canvas.pack(side=tk.RIGHT, padx=(int(6 * scale), 0))
+
+    def draw_apply_btn(hover=False):
+        apply_canvas.delete("all")
+        col = BTN_BG_HOVER if hover else BTN_BG
+        draw_round_rect(apply_canvas, apply_w, ctrl_h, col, radius=6)
+        apply_canvas.create_text(apply_w / 2, ctrl_h / 2, text=t("color_apply"),
+                                 fill=TEXT_COLOR, font=("Segoe UI", 9), anchor="center")
+
+    apply_canvas.bind("<Enter>", lambda e: draw_apply_btn(True))
+    apply_canvas.bind("<Leave>", lambda e: draw_apply_btn(False))
+    apply_canvas.bind("<Button-1>", apply_and_close)
+    draw_apply_btn(False)
+
+    render_lum()
+    render_spectrum()
+    update_live_preview(state["hex"])
+
+    win.update_idletasks()
+    pw = max(int(310 * scale), win.winfo_reqwidth())
+    ph = win.winfo_reqheight()
+    sw = win.winfo_screenwidth()
+    sh = win.winfo_screenheight()
+    if popup_window is not None:
+        px = popup_window.winfo_x()
+        py = popup_window.winfo_y()
+        x_pos = max(10, min(sw - pw - 10, px + popup_window.winfo_width() - pw))
+        y_pos = max(10, min(sh - ph - 10, py - ph - 8))
+    else:
+        x_pos = max(10, (sw - pw) // 2)
+        y_pos = max(10, (sh - ph) // 2)
+    win.geometry(f"{pw}x{ph}+{x_pos}+{y_pos}")
+
+    win.protocol("WM_DELETE_WINDOW", dismiss_without_apply)
+    win.bind("<Escape>", dismiss_without_apply)
+    win.bind("<Return>", lambda e: None if e.widget is hex_entry else apply_and_close(e))
+    win.deiconify()
+    win.focus_force()
+
 _qr_cache = None
 
 def show_about(icon=None, item=None):
@@ -1068,11 +1927,12 @@ def _show_about_ui():
         except Exception:
             about_window = None
 
+    scale = _ui_scale()
     win = tk.Toplevel(root_window)
     about_window = win
     win.withdraw()
     win.title(f"Eyedim {APP_VERSION}")
-    win.geometry("260x280")
+    win.geometry(f"{int(260 * scale)}x{int(280 * scale)}")
     win.attributes("-topmost", True)
     win.resizable(False, False)
 
@@ -1089,16 +1949,16 @@ def _show_about_ui():
 
     screen_width = win.winfo_screenwidth()
     screen_height = win.winfo_screenheight()
-    win.geometry(f"+{screen_width // 2 - 130}+{screen_height // 2 - 140}")
+    win.geometry(f"+{screen_width // 2 - int(130 * scale)}+{screen_height // 2 - int(140 * scale)}")
 
-    frame = tk.Frame(win, padx=12, pady=12, bg=PANEL_BG)
+    frame = tk.Frame(win, padx=int(12 * scale), pady=int(12 * scale), bg=PANEL_BG)
     win.config(bg=PANEL_BG)
     frame.pack(fill=tk.BOTH, expand=True)
 
     tk.Label(frame, text=f"Eyedim {APP_VERSION}", font=("Segoe UI", 11, "bold"),
              bg=PANEL_BG).pack(anchor="w")
     tk.Label(frame, text=t("about_desc"), font=("Segoe UI", 8), fg="#555555",
-             bg=PANEL_BG, justify="left", wraplength=230).pack(anchor="w", pady=(2, 6))
+             bg=PANEL_BG, justify="left", wraplength=int(230 * scale)).pack(anchor="w", pady=(2, 6))
     tk.Label(frame, text=t("about_author"), font=("Segoe UI", 8),
              bg=PANEL_BG, justify="left").pack(anchor="w", pady=(0, 4))
     tk.Label(frame, text=t("about_license"), font=("Segoe UI", 7), fg="#777777",
@@ -1111,7 +1971,7 @@ def _show_about_ui():
 
     def show_qr(data):
         if about_window is not win:
-            return          # window was closed or rebuilt meanwhile
+            return
         try:
             from PIL import ImageTk
             qr_photo = ImageTk.PhotoImage(Image.open(io.BytesIO(data)))
@@ -1146,10 +2006,10 @@ def _show_about_ui():
     win.protocol("WM_DELETE_WINDOW", on_close)
     win.deiconify()
 
-# --- THIN SLIDER ---
 class ThinSlider(tk.Canvas):
     def __init__(self, parent, from_=0, to=100, command=None, initial=0):
-        super().__init__(parent, height=22, bg=PANEL_BG, highlightthickness=0)
+        self._scale = _ui_scale()
+        super().__init__(parent, height=int(22 * self._scale), bg=PANEL_BG, highlightthickness=0)
         self.from_ = from_
         self.to = to
         self.command = command
@@ -1168,7 +2028,7 @@ class ThinSlider(tk.Canvas):
     def set(self, val, update_command=True):
         val = max(self.from_, min(self.to, int(val)))
         if val == self._value:
-            return          # same value: no redraw, no system call, no save
+            return
         self._value = val
         self.draw()
         if update_command and self.command:
@@ -1179,8 +2039,8 @@ class ThinSlider(tk.Canvas):
         w = self.winfo_width()
         h = self.winfo_height()
 
-        thumb_size = 12
-        margin = thumb_size // 2 + 2
+        thumb_size = int(12 * self._scale)
+        margin = thumb_size // 2 + int(2 * self._scale)
         line_y = h // 2
         inner_w = w - 2 * margin
 
@@ -1191,19 +2051,19 @@ class ThinSlider(tk.Canvas):
 
         if pos > margin:
             self.create_rectangle(margin, line_y - 1, pos, line_y + 1,
-                                  fill=ACCENT, outline="")
+                                  fill=accent_color, outline="")
         if pos < w - margin:
             self.create_rectangle(pos, line_y - 1, w - margin, line_y + 1,
                                   fill="#cccccc", outline="")
 
         self.create_oval(pos - thumb_size // 2, line_y - thumb_size // 2,
                          pos + thumb_size // 2, line_y + thumb_size // 2,
-                         fill=ACCENT, outline=ACCENT, width=0)
+                         fill=accent_color, outline=accent_color, width=0)
 
     def _update_from_event(self, event):
         w = self.winfo_width()
-        thumb_size = 12
-        margin = thumb_size // 2 + 2
+        thumb_size = int(12 * self._scale)
+        margin = thumb_size // 2 + int(2 * self._scale)
         inner_w = w - 2 * margin
         if inner_w <= 0:
             return
@@ -1222,92 +2082,102 @@ class ThinSlider(tk.Canvas):
         delta = 1 if event.delta > 0 or event.num == 4 else -1
         self.set(self._value + delta * 3, update_command=True)
 
-# --- POPUP WINDOW ---
 def show_popup(icon=None, item=None):
     ui_call(_show_popup_ui)
 
 def _show_popup_ui():
     global popup_window, brightness_slider_ref, night_slider_ref, contrast_slider_ref
-    global brightness_label_ref, night_label_ref, contrast_label_ref, mode_btn_redraw_ref
+    global brightness_label_ref, night_label_ref, contrast_label_ref
+    global mode_btn_redraw_ref, palette_btn_redraw_ref
     if popup_window is not None:
         close_popup()
         return
 
     close_about()
 
-    popup_window = tk.Toplevel(root_window)
-    popup_window.title(t("window_title"))
-    popup_window.geometry(f"{POPUP_W}x{popup_height()}")
-    popup_window.attributes("-topmost", True)
-    popup_window.resizable(False, False)
-    popup_window.overrideredirect(True)
+    scale = _ui_scale()
+    pw = int(round(POPUP_W * scale))
+    ph = int(round(popup_height() * scale))
 
-    popup_window.update_idletasks()
+    win = tk.Toplevel(root_window)
+    popup_window = win
+    win.title(t("window_title"))
+    win.geometry(f"{pw}x{ph}")
+    win.attributes("-topmost", True)
+    win.resizable(False, False)
+    win.overrideredirect(True)
+
+    win.update_idletasks()
     try:
-        hwnd = ctypes.windll.user32.GetParent(popup_window.winfo_id())
+        hwnd = ctypes.windll.user32.GetParent(win.winfo_id())
         if not hwnd:
-            hwnd = popup_window.winfo_id()
+            hwnd = win.winfo_id()
         ctypes.windll.dwmapi.DwmSetWindowAttribute(
             hwnd, DWMWA_WINDOW_CORNER_PREFERENCE,
             ctypes.byref(ctypes.c_int(2)), ctypes.sizeof(ctypes.c_int))
     except Exception:
         pass
 
-    screen_width = popup_window.winfo_screenwidth()
-    screen_height = popup_window.winfo_screenheight()
-    popup_window.geometry(f"+{screen_width - POPUP_W - 20}+{screen_height - popup_height() - 60}")
+    screen_width = win.winfo_screenwidth()
+    screen_height = win.winfo_screenheight()
+    win.geometry(f"+{screen_width - pw - int(20 * scale)}+{screen_height - ph - int(60 * scale)}")
 
-    frame = tk.Frame(popup_window, padx=16, pady=14, bg=PANEL_BG)
-    popup_window.config(bg=PANEL_BG)
+    frame = tk.Frame(win, padx=int(16 * scale), pady=int(14 * scale), bg=PANEL_BG)
+    win.config(bg=PANEL_BG)
     frame.pack(fill=tk.BOTH, expand=True)
     frame.columnconfigure(1, weight=1)
 
-    # Brightness row
-    canvas_sun = tk.Canvas(frame, width=26, height=22, bg=PANEL_BG, highlightthickness=0)
-    canvas_sun.grid(row=0, column=0, sticky="w", padx=(0, 4))
-    draw_vector_sun(canvas_sun, 13, 11)
+    canvas_sun = tk.Canvas(frame, width=int(26 * scale), height=int(22 * scale),
+                           bg=PANEL_BG, highlightthickness=0)
+    canvas_sun.grid(row=0, column=0, sticky="w", padx=(0, int(4 * scale)))
+    draw_vector_sun(canvas_sun, int(13 * scale), int(11 * scale))
 
     brightness_slider_ref = ThinSlider(frame, from_=0, to=100,
                                        command=set_brightness, initial=current_brightness)
-    brightness_slider_ref.grid(row=0, column=1, sticky="ew", padx=(0, 6))
+    brightness_slider_ref.grid(row=0, column=1, columnspan=2, sticky="ew",
+                               padx=(0, int(6 * scale)))
 
     brightness_label_ref = tk.Label(frame, text=f"{current_brightness}",
                                     font=("Segoe UI", 10), fg=TEXT_COLOR,
                                     bg=PANEL_BG, width=3, anchor="e")
-    brightness_label_ref.grid(row=0, column=2, sticky="e")
+    brightness_label_ref.grid(row=0, column=3, sticky="e")
 
-    # Night light row
-    canvas_moon = tk.Canvas(frame, width=26, height=22, bg=PANEL_BG, highlightthickness=0)
-    canvas_moon.grid(row=1, column=0, sticky="w", padx=(0, 4), pady=(2, 0))
-    draw_vector_moon(canvas_moon, 13, 11, bg=PANEL_BG)
+    canvas_moon = tk.Canvas(frame, width=int(26 * scale), height=int(22 * scale),
+                            bg=PANEL_BG, highlightthickness=0)
+    canvas_moon.grid(row=1, column=0, sticky="w", padx=(0, int(4 * scale)),
+                     pady=(int(2 * scale), 0))
+    draw_vector_moon(canvas_moon, int(13 * scale), int(11 * scale), bg=PANEL_BG)
 
     night_slider_ref = ThinSlider(frame, from_=0, to=100,
                                   command=set_night_light, initial=current_night_light)
-    night_slider_ref.grid(row=1, column=1, sticky="ew", padx=(0, 6), pady=(2, 0))
+    night_slider_ref.grid(row=1, column=1, columnspan=2, sticky="ew",
+                          padx=(0, int(6 * scale)), pady=(int(2 * scale), 0))
 
     night_label_ref = tk.Label(frame, text=f"{current_night_light}",
                                font=("Segoe UI", 10), fg=TEXT_COLOR,
                                bg=PANEL_BG, width=3, anchor="e")
-    night_label_ref.grid(row=1, column=2, sticky="e", pady=(2, 0))
+    night_label_ref.grid(row=1, column=3, sticky="e", pady=(int(2 * scale), 0))
 
-    # Contrast row
-    canvas_contrast = tk.Canvas(frame, width=26, height=22, bg=PANEL_BG, highlightthickness=0)
-    canvas_contrast.grid(row=2, column=0, sticky="w", padx=(0, 4), pady=(2, 0))
-    draw_vector_contrast(canvas_contrast, 13, 11)
+    canvas_contrast = tk.Canvas(frame, width=int(26 * scale), height=int(22 * scale),
+                                bg=PANEL_BG, highlightthickness=0)
+    canvas_contrast.grid(row=2, column=0, sticky="w", padx=(0, int(4 * scale)),
+                         pady=(int(2 * scale), 0))
+    draw_vector_contrast(canvas_contrast, int(13 * scale), int(11 * scale))
 
     contrast_slider_ref = ThinSlider(frame, from_=0, to=100,
                                      command=set_contrast, initial=current_contrast)
-    contrast_slider_ref.grid(row=2, column=1, sticky="ew", padx=(0, 6), pady=(2, 0))
+    contrast_slider_ref.grid(row=2, column=1, columnspan=2, sticky="ew",
+                             padx=(0, int(6 * scale)), pady=(int(2 * scale), 0))
 
     contrast_label_ref = tk.Label(frame, text=f"{current_contrast}",
                                   font=("Segoe UI", 10), fg=TEXT_COLOR,
                                   bg=PANEL_BG, width=3, anchor="e")
-    contrast_label_ref.grid(row=2, column=2, sticky="e", pady=(2, 0))
+    contrast_label_ref.grid(row=2, column=3, sticky="e", pady=(int(2 * scale), 0))
 
-    # Mode button
-    btn_canvas = tk.Canvas(frame, height=30, bg=PANEL_BG,
+    btn_canvas = tk.Canvas(frame, height=int(30 * scale), bg=PANEL_BG,
                            highlightthickness=0, cursor="hand2")
-    btn_canvas.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+    btn_canvas.grid(row=3, column=0, columnspan=2, sticky="ew",
+                    padx=(0, int(6 * scale)), pady=(int(8 * scale), 0))
 
     def current_bg():
         return BTN_BG
@@ -1320,18 +2190,18 @@ def _show_popup_ui():
         w = btn_canvas.winfo_width()
         h = btn_canvas.winfo_height()
         if w <= 1:
-            w = 216
+            w = int(196 * scale)
         if h <= 1:
-            h = 30
+            h = int(30 * scale)
 
         draw_round_rect(btn_canvas, w, h, bg_col)
 
         label = t("mode_default") if preset_active else t("mode_user")
-        text_id = btn_canvas.create_text(w / 2 + 12, h / 2, text=label,
-                                         fill=TEXT_COLOR, font=("Segoe UI", 10),
+        text_id = btn_canvas.create_text(w / 2 + int(10 * scale), h / 2, text=label,
+                                         fill=TEXT_COLOR, font=("Segoe UI", 9),
                                          anchor="center")
         bbox = btn_canvas.bbox(text_id)
-        icon_x = (bbox[0] - 16) if bbox else (w / 2 - 40)
+        icon_x = max(float(14 * scale), (bbox[0] - int(13 * scale))) if bbox else (w / 2 - int(46 * scale))
         icon_y = h / 2
 
         draw_vector_gear(btn_canvas, icon_x, icon_y)
@@ -1347,10 +2217,31 @@ def _show_popup_ui():
     btn_canvas.bind("<Button-1>", on_btn_click)
     mode_btn_redraw_ref = lambda: draw_rounded_btn(current_bg())
 
-    # Contrast on/off toggle (right of the Mode button)
-    tog_canvas = tk.Canvas(frame, width=30, height=30, bg=PANEL_BG,
-                           highlightthickness=0, cursor="hand2")
-    tog_canvas.grid(row=3, column=2, sticky="e", padx=(6, 0), pady=(8, 0))
+    pal_canvas = tk.Canvas(frame, width=int(30 * scale), height=int(30 * scale),
+                           bg=PANEL_BG, highlightthickness=0, cursor="hand2")
+    pal_canvas.grid(row=3, column=2, sticky="e", padx=(0, int(6 * scale)),
+                    pady=(int(8 * scale), 0))
+
+    def draw_palette_btn(hover=False):
+        pal_canvas.delete("all")
+        col = BTN_BG_HOVER if hover else BTN_BG
+        draw_round_rect(pal_canvas, int(30 * scale), int(30 * scale), col)
+        draw_vector_palette(pal_canvas, int(15 * scale), int(15 * scale),
+                            dot_color=accent_color)
+
+    def on_pick_color(e=None):
+        if popup_window is not win:
+            return
+        open_color_picker()
+
+    pal_canvas.bind("<Enter>", lambda e: draw_palette_btn(True))
+    pal_canvas.bind("<Leave>", lambda e: draw_palette_btn(False))
+    pal_canvas.bind("<Button-1>", on_pick_color)
+    palette_btn_redraw_ref = lambda: draw_palette_btn(False)
+
+    tog_canvas = tk.Canvas(frame, width=int(30 * scale), height=int(30 * scale),
+                           bg=PANEL_BG, highlightthickness=0, cursor="hand2")
+    tog_canvas.grid(row=3, column=3, sticky="e", pady=(int(8 * scale), 0))
     contrast_row_widgets = (canvas_contrast, contrast_slider_ref, contrast_label_ref)
 
     def draw_toggle(hover=False):
@@ -1359,8 +2250,8 @@ def _show_popup_ui():
             col = "#efd29a" if hover else "#f6dfb8"
         else:
             col = BTN_BG_HOVER if hover else BTN_BG
-        draw_round_rect(tog_canvas, 30, 30, col)
-        draw_vector_contrast(tog_canvas, 15, 15)
+        draw_round_rect(tog_canvas, int(30 * scale), int(30 * scale), col)
+        draw_vector_contrast(tog_canvas, int(15 * scale), int(15 * scale))
 
     def apply_contrast_visibility():
         for wdg in contrast_row_widgets:
@@ -1368,11 +2259,12 @@ def _show_popup_ui():
                 wdg.grid()
             else:
                 wdg.grid_remove()
-        h = popup_height()
-        sw = popup_window.winfo_screenwidth()
-        sh = popup_window.winfo_screenheight()
-        popup_window.geometry(f"{POPUP_W}x{h}+{sw - POPUP_W - 20}+{sh - h - 60}")
+        h = int(round(popup_height() * scale))
+        sw = win.winfo_screenwidth()
+        sh = win.winfo_screenheight()
+        win.geometry(f"{pw}x{h}+{sw - pw - int(20 * scale)}+{sh - h - int(60 * scale)}")
         draw_toggle()
+        draw_palette_btn()
 
     def on_toggle_contrast(e=None):
         global show_contrast
@@ -1387,20 +2279,20 @@ def _show_popup_ui():
     tog_canvas.bind("<Button-1>", on_toggle_contrast)
     apply_contrast_visibility()
 
-    popup_window.bind("<FocusOut>", lambda e: close_popup())
-    popup_window.focus_force()
+    def on_popup_focus_out(e):
+        if _picking_color or color_picker_window is not None:
+            return
+        close_popup()
 
-# --- DISPLAY PANEL TEST ---
-# Full-screen solid colours and test patterns for checking a monitor for dead
-# or stuck pixels, backlight bleed and geometry. Opens on every monitor at once
-# (all show the same screen); night light and contrast stay neutral meanwhile.
+    win.bind("<FocusOut>", on_popup_focus_out)
+    win.focus_force()
+
 PANEL_TEST_SOLIDS = [(0, 0, 0), (255, 255, 255), (255, 0, 0),
                      (0, 255, 0), (0, 0, 255), (128, 128, 128)]
 PANEL_TEST_HINT_MS = 2500
 DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = -4
 
 def _grid_lines(draw, w, h, cell, color):
-    """1 px lines every `cell` pixels, aligned so that lines cross the centre."""
     cx, cy = w // 2, h // 2
     for x in range(cx % cell, w, cell):
         draw.line([(x, 0), (x, h - 1)], fill=color)
@@ -1408,7 +2300,6 @@ def _grid_lines(draw, w, h, cell, color):
         draw.line([(0, y), (w - 1, y)], fill=color)
 
 def render_grid(w, h, divisor=1):
-    """Grid of ~12 cells across the short side, `divisor` times finer."""
     img = Image.new("RGB", (w, h), (0, 0, 0))
     d = ImageDraw.Draw(img)
     coarse = max(8, round(min(w, h) / 12))
@@ -1431,7 +2322,6 @@ def render_test_card(w, h):
                  (cr * 1.3, h - cr * 1.3), (w - cr * 1.3, h - cr * 1.3)):
         d.ellipse([x - cr, y - cr, x + cr, y + cr], outline=(255, 255, 255), width=line_w)
 
-    # everything inside the big circle is drawn on its own square, then masked
     R = round(min(w, h) * 0.44)
     S = 2 * R
     inner = Image.new("RGB", (S, S), (26, 26, 26))
@@ -1443,16 +2333,16 @@ def render_test_card(w, h):
 
     bars = [(255, 255, 255), (255, 255, 0), (0, 255, 255), (0, 255, 0),
             (255, 0, 255), (255, 0, 0), (0, 0, 255), (0, 0, 0)]
-    for i, col in enumerate(bars):                       # colour bars
+    for i, col in enumerate(bars):
         box(i * S / 8, 0, (i + 1) * S / 8, band * 1.6, col)
-    for i in range(11):                                  # grey steps 0..100 %
+    for i in range(11):
         v = round(i * 25.5)
         box(i * S / 11, band * 1.6, (i + 1) * S / 11, band * 2.5, (v, v, v))
-    gy0, gy1 = round(band * 2.5), round(band * 3.2)      # black-to-white ramp
+    gy0, gy1 = round(band * 2.5), round(band * 3.2)
     for x in range(S):
         v = round(x * 255 / max(1, S - 1))
         di.line([(x, gy0), (x, gy1 - 1)], fill=(v, v, v))
-    fy0, fy1 = band * 3.2, band * 4.2                    # line-pair wedges
+    fy0, fy1 = band * 3.2, band * 4.2
     for gi, p in enumerate((8, 5, 3, 2, 1)):
         gx = round(S * 0.08 + gi * S * 0.17)
         gw = round(S * 0.15)
@@ -1483,7 +2373,6 @@ PANEL_TEST_PATTERNS = [lambda w, h: render_grid(w, h),
                        render_test_card]
 
 def _monitor_rects():
-    """Rectangles of all monitors; the one under the mouse cursor goes first."""
     rects = []
     try:
         cursor = win32api.GetCursorPos()
@@ -1525,9 +2414,6 @@ def _open_panel_test():
     close_popup()
     close_about()
 
-    # Create the windows per-monitor DPI aware, so that on a scaled display
-    # (125 %, 150 % ...) every pattern pixel is one physical pixel and Windows
-    # does not blur the picture. The rest of the app stays as it is.
     user32 = ctypes.windll.user32
     old_ctx = None
     try:
@@ -1537,7 +2423,7 @@ def _open_panel_test():
             ctypes.c_void_p(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2))
     except Exception:
         old_ctx = None
-    screens = []                                # (window, canvas, w, h) per monitor
+    screens = []
     try:
         for left, top, right, bottom in _monitor_rects():
             w, h = right - left, bottom - top
@@ -1562,7 +2448,7 @@ def _open_panel_test():
 
     total = len(PANEL_TEST_SOLIDS) + len(PANEL_TEST_PATTERNS)
     state = {"i": 0, "hint_job": None}
-    photos = {}                                 # (pattern, w, h) -> PhotoImage
+    photos = {}
 
     def hide_hint():
         state["hint_job"] = None
@@ -1622,15 +2508,14 @@ def _open_panel_test():
     show()
     for win, _canvas, _w, _h in screens:
         win.lift()
-    screens[0][0].focus_force()             # keyboard goes to the cursor's monitor
+    screens[0][0].focus_force()
 
-# --- QUIT ---
 def quit_app(icon, item):
     global _exiting
     _exiting = True
     _shutting_down.set()
     try:
-        icon.visible = False          # tray icon disappears immediately
+        icon.visible = False
     except Exception:
         pass
     if _reapply_timer:
@@ -1639,11 +2524,10 @@ def quit_app(icon, item):
     brightness_queue.put(None)
     brightness_thread.join(1.0)
 
-    # back to the original state: neutral gamma + brightness from before launch
     request_gamma_update(0, 50, instant=True)
     apply_gamma_direct(0, 50)
     restore_original_brightness()
-    apply_gamma_direct(0, 50)         # DDC writes may reset the ramp again
+    apply_gamma_direct(0, 50)
     save_config(clean_exit=True)
 
     def shutdown():
@@ -1659,14 +2543,9 @@ def quit_app(icon, item):
 
     ui_call(shutdown)
 
-# --- MOUSE WHEEL OVER THE TRAY ICON ---
-# Windows never sends wheel messages to tray icons, so we catch them with a
-# low-level mouse hook. The hook is installed only while the cursor is over
-# our icon (the icon reports WM_MOUSEMOVE) and is removed as soon as it leaves,
-# so the rest of the time nothing runs and other programs keep their wheel.
-WHEEL_STEP = 5                      # % per wheel notch
+WHEEL_STEP = 5
 WHEEL_DELTA = 120
-WHEEL_POLL_MS = 150                 # how often we check that the cursor is still there
+WHEEL_POLL_MS = 150
 WM_MOUSEMOVE = 0x0200
 WM_MOUSEWHEEL = 0x020A
 WM_TIMER = 0x0113
@@ -1694,14 +2573,13 @@ def _wheel_apply(steps):
     if _shutting_down.is_set() or steps == 0:
         return
     cur = current_brightness
-    # snap to the step grid, so 83 goes to 85 / 80 and then in whole steps
     if steps > 0:
         val = (cur // WHEEL_STEP + steps) * WHEEL_STEP
     else:
         val = (-(-cur // WHEEL_STEP) + steps) * WHEEL_STEP
     val = max(0, min(100, val))
     if val != cur:
-        set_brightness(val)         # same smooth path as the slider
+        set_brightness(val)
 
 def _wheel_thread_main(ready):
     global _wheel_tid, _wheel_armed
@@ -1723,7 +2601,6 @@ def _wheel_thread_main(ready):
     shell32 = ctypes.windll.shell32
     shell32.Shell_NotifyIconGetRect.argtypes = [ctypes.POINTER(_NOTIFYICONIDENTIFIER),
                                                 ctypes.POINTER(wintypes.RECT)]
-    # physical pixels everywhere: the hook, the cursor and the icon rect
     try:
         user32.SetThreadDpiAwarenessContext.restype = ctypes.c_void_p
         user32.SetThreadDpiAwarenessContext.argtypes = [ctypes.c_void_p]
@@ -1734,21 +2611,20 @@ def _wheel_thread_main(ready):
 
     tid = kernel32.GetCurrentThreadId()
     msg = wintypes.MSG()
-    user32.PeekMessageW(ctypes.byref(msg), None, 0, 0, 0)   # create the queue
+    user32.PeekMessageW(ctypes.byref(msg), None, 0, 0, 0)
     _wheel_tid = tid
     ready.set()
 
     hook = None
     timer = 0
     rect = wintypes.RECT()
-    acc = 0                         # sub-notch delta from smooth wheels / touchpads
+    acc = 0
 
     def icon_rect():
         icon = tray_icon_ref
         hwnd = getattr(icon, "_hwnd", None)
         if not hwnd:
             return False
-        # pystray registers the icon with uID 0; try id(icon) too just in case
         for uid in (0, id(icon) & 0xFFFFFFFF):
             nid = _NOTIFYICONIDENTIFIER(cbSize=ctypes.sizeof(_NOTIFYICONIDENTIFIER),
                                         hWnd=hwnd, uID=uid)
@@ -1770,19 +2646,18 @@ def _wheel_thread_main(ready):
         steps = int(acc / WHEEL_DELTA)
         if steps:
             acc -= steps * WHEEL_DELTA
-            # do the work outside the hook so the mouse never stutters
             user32.PostThreadMessageW(tid, WM_APP_WHEEL_STEP, steps & 0xFFFFFFFF, 0)
         return True
 
     def hook_proc(n_code, w_param, l_param):
         try:
             if n_code == HC_ACTION and w_param == WM_MOUSEWHEEL and on_wheel(l_param):
-                return 1            # swallow: the taskbar should not scroll
+                return 1
         except Exception:
             pass
         return user32.CallNextHookEx(None, n_code, w_param, l_param)
 
-    proc = _LowLevelMouseProc(hook_proc)    # keep a reference while hooked
+    proc = _LowLevelMouseProc(hook_proc)
 
     def disarm():
         global _wheel_armed
@@ -1806,7 +2681,6 @@ def _wheel_thread_main(ready):
                 if _shutting_down.is_set():
                     continue
                 if not icon_rect():
-                    # no rect from the shell: a small box around the cursor
                     pt = wintypes.POINT()
                     user32.GetCursorPos(ctypes.byref(pt))
                     rect.left, rect.top = pt.x - 16, pt.y - 16
@@ -1833,14 +2707,13 @@ def _wheel_thread_main(ready):
         disarm()
 
 def start_wheel_control(icon):
-    """Route wheel scrolls over the tray icon to the brightness."""
     ready = threading.Event()
     threading.Thread(target=_wheel_thread_main, args=(ready,), daemon=True).start()
     ready.wait(2.0)
     handlers = getattr(icon, "_message_handlers", None)
     on_notify = getattr(icon, "_on_notify", None)
     if not isinstance(handlers, dict) or on_notify is None:
-        return                      # unknown pystray internals: skip the feature
+        return
     for code, fn in list(handlers.items()):
         if fn == on_notify:
             def notify(wparam, lparam, _orig=fn):
@@ -1857,7 +2730,6 @@ def stop_wheel_control():
         except Exception:
             pass
 
-# --- TRAY ICON SETUP ---
 tray_icon_ref = pystray.Icon(
     "Eyedim",
     create_text_icon(current_brightness),
@@ -1876,8 +2748,7 @@ tray_icon_ref = pystray.Icon(
 
 tray_icon_ref.default_action = show_popup
 start_wheel_control(tray_icon_ref)
-update_tray_icon()          # localized tooltip from the very start
-# apply the stored state right away, then keep it alive across sleep/display changes
+update_tray_icon()
 enqueue_brightness(current_brightness, force=True)
 request_gamma_update(current_night_light, effective_contrast(), instant=True)
 start_display_watcher()
